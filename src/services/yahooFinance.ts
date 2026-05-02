@@ -1,0 +1,91 @@
+export interface QuoteResult {
+  symbol: string;
+  price: number;
+  currency: string;
+  name?: string;
+  dividendYieldPct?: number;
+  prev1d?: number;   // previous trading day close
+  prev7d?: number;   // ~7 calendar days ago close
+  prev30d?: number;  // ~30 calendar days ago close
+  prevYtd?: number;  // first trading day of the current calendar year
+}
+
+// FX symbols: how many USD = 1 unit of this currency
+export const FX_SYMBOLS: Record<string, string> = {
+  SGD: 'SGDUSD=X',
+  JPY: 'JPYUSD=X',
+  HKD: 'HKDUSD=X',
+  CNY: 'CNHUSD=X',
+  EUR: 'EURUSD=X',
+  GBP: 'GBPUSD=X',
+  AUD: 'AUDUSD=X',
+  CAD: 'CADUSD=X',
+};
+
+function findClosestPrice(
+  timestamps: number[],
+  closes: (number | null)[],
+  targetTs: number
+): number | undefined {
+  let bestIdx = -1;
+  let bestDiff = Infinity;
+  for (let i = 0; i < timestamps.length; i++) {
+    if (closes[i] == null) continue;
+    const diff = Math.abs(timestamps[i] - targetTs);
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      bestIdx = i;
+    }
+  }
+  return bestIdx >= 0 ? (closes[bestIdx] as number) : undefined;
+}
+
+async function fetchSingle(symbol: string): Promise<QuoteResult | null> {
+  try {
+    // 6 months of daily data covers 1d / 7d / 30d and YTD (Jan 1 of current year)
+    const url = `/yf/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=6mo`;
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const result = data?.chart?.result?.[0];
+    const meta = result?.meta;
+    if (!meta?.regularMarketPrice) return null;
+
+    const rawYield = meta.trailingAnnualDividendYield;
+    const dividendYieldPct =
+      typeof rawYield === 'number' && rawYield > 0 ? rawYield * 100 : undefined;
+
+    const timestamps: number[] = result.timestamp ?? [];
+    const closes: (number | null)[] = result.indicators?.quote?.[0]?.close ?? [];
+    const now = Date.now() / 1000;
+
+    const yearStartTs = new Date(new Date().getFullYear(), 0, 1).getTime() / 1000;
+
+    const prev1d: number | undefined = meta.chartPreviousClose ?? meta.previousClose ?? undefined;
+    const prev7d  = findClosestPrice(timestamps, closes, now - 7  * 86400);
+    const prev30d = findClosestPrice(timestamps, closes, now - 30 * 86400);
+    const prevYtd = findClosestPrice(timestamps, closes, yearStartTs);
+
+    return {
+      symbol,
+      price: meta.regularMarketPrice,
+      currency: meta.currency ?? 'USD',
+      name: meta.longName ?? meta.shortName,
+      dividendYieldPct,
+      prev1d,
+      prev7d,
+      prev30d,
+      prevYtd,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchQuotes(symbols: string[]): Promise<QuoteResult[]> {
+  const unique = [...new Set(symbols)];
+  const results = await Promise.allSettled(unique.map(fetchSingle));
+  return results
+    .filter((r): r is PromiseFulfilledResult<QuoteResult> => r.status === 'fulfilled' && r.value !== null)
+    .map((r) => r.value);
+}
