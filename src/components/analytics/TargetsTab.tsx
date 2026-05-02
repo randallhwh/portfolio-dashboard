@@ -1,5 +1,15 @@
 import { useRef } from 'react';
+import { Activity, Zap, TrendingDown, TrendingUp, AlertTriangle, RefreshCw } from 'lucide-react';
 import { usePortfolioStore, toBase, fmtBase, filterByPortfolio } from '../../store/portfolioStore';
+import { useRegimeStore } from '../../store/regimeStore';
+import {
+  REGIME_META,
+  BUSINESS_CYCLE_META,
+  VOLATILITY_META,
+  LIQUIDITY_META,
+  CREDIT_CYCLE_META,
+  type RegimeName,
+} from '../../services/regimeDetection';
 import type { AssetClass, Currency } from '../../types/portfolio';
 
 const ASSET_COLORS: Record<string, string> = {
@@ -20,33 +30,11 @@ const ASSET_LABEL: Record<string, string> = {
 
 const ALL_CLASSES: AssetClass[] = ['stock', 'bond', 'cash', 'real_estate', 'etf', 'crypto', 'commodity', 'other'];
 
-type Regime = 'risk-on' | 'balanced' | 'defensive' | 'stagflation';
-
-const REGIME_LABELS: Record<Regime, string> = {
-  'risk-on':    'Risk-On',
-  'balanced':   'Balanced',
-  'defensive':  'Defensive',
-  'stagflation':'Stagflation',
-};
-
-const REGIME_DESC: Record<Regime, string> = {
-  'risk-on':    'Growth expansion — favour equities and real assets over bonds and cash.',
-  'balanced':   'Neutral environment — diversified across asset classes.',
-  'defensive':  'Risk-off / contraction — rotate into bonds and cash; reduce equity.',
-  'stagflation':'High inflation + slow growth — real assets, cash; avoid long-duration bonds.',
-};
-
-// Allocations sum to 100 for each regime
-const REGIME_PRESETS: Record<Regime, Partial<Record<AssetClass, number>>> = {
-  'risk-on':    { stock: 70, bond: 10, cash: 5,  real_estate: 15 },
-  'balanced':   { stock: 55, bond: 20, cash: 10, real_estate: 15 },
-  'defensive':  { stock: 30, bond: 40, cash: 20, real_estate: 10 },
-  'stagflation':{ stock: 25, bond: 10, cash: 30, real_estate: 20, commodity: 15 },
-};
-
 const ZERO_ALLOCS: Record<AssetClass, number> = {
   stock: 0, bond: 0, cash: 0, real_estate: 0, etf: 0, crypto: 0, commodity: 0, other: 0,
 };
+
+const SELECTABLE_REGIMES: RegimeName[] = ['GOLDILOCKS', 'REFLATION', 'STAGFLATION', 'RECESSION', 'RISK_OFF_SPIKE'];
 
 // ── Draggable proportional bar ────────────────────────────────────────────────
 interface DraggableBarProps {
@@ -69,12 +57,11 @@ function DraggableBar({ classes, values, onUpdate }: DraggableBarProps) {
 
     const onMove = (ev: MouseEvent) => {
       if (!barRef.current) return;
-      const barW   = barRef.current.getBoundingClientRect().width;
-      const delta  = ((ev.clientX - startX) / barW) * 100;
-      const newL   = Math.round(Math.max(0, Math.min(combined, leftStart + delta)));
-      const newR   = combined - newL;
+      const barW  = barRef.current.getBoundingClientRect().width;
+      const delta = ((ev.clientX - startX) / barW) * 100;
+      const newL  = Math.round(Math.max(0, Math.min(combined, leftStart + delta)));
       onUpdate(leftCls,  newL);
-      onUpdate(rightCls, newR);
+      onUpdate(rightCls, combined - newL);
     };
     const onUp = () => {
       document.removeEventListener('mousemove', onMove);
@@ -120,24 +107,215 @@ function DraggableBar({ classes, values, onUpdate }: DraggableBarProps) {
   );
 }
 
+// ── Regime selector card ──────────────────────────────────────────────────────
+function RegimeCard({
+  regime, isSelected, isDetected, onClick,
+}: {
+  regime: RegimeName;
+  isSelected: boolean;
+  isDetected: boolean;
+  onClick: () => void;
+}) {
+  const meta    = REGIME_META[regime];
+  const targets = meta.targets as Record<string, number>;
+
+  // Pick a representative icon per regime
+  const icon =
+    regime === 'GOLDILOCKS'     ? <TrendingUp  size={13} /> :
+    regime === 'REFLATION'      ? <Activity    size={13} /> :
+    regime === 'STAGFLATION'    ? <TrendingDown size={13} /> :
+    regime === 'RECESSION'      ? <TrendingDown size={13} /> :
+                                  <AlertTriangle size={13} />;
+
+  return (
+    <button
+      onClick={onClick}
+      className={`relative rounded-xl border p-3.5 text-left transition-all ${
+        isSelected
+          ? `${meta.bgColor} ${meta.borderColor} ring-1 ring-inset ${meta.borderColor}`
+          : 'bg-slate-800/60 border-slate-700/50 hover:border-slate-600'
+      }`}
+    >
+      {isDetected && (
+        <span className="absolute top-2 right-2 text-[9px] font-bold uppercase tracking-wider bg-slate-700 text-slate-300 px-1.5 py-0.5 rounded">
+          detected
+        </span>
+      )}
+      <div className={`flex items-center gap-1.5 mb-1.5 ${isSelected ? meta.color : 'text-slate-500'}`}>
+        {icon}
+        <p className={`text-xs font-bold uppercase tracking-wider ${isSelected ? meta.color : 'text-slate-400'}`}>
+          {meta.label}
+        </p>
+      </div>
+      <p className={`text-[11px] mb-2 ${isSelected ? meta.color : 'text-slate-500'} font-medium`}>
+        {meta.tagline}
+      </p>
+      {/* Mini allocation preview */}
+      <div className="space-y-0.5">
+        {Object.entries(targets)
+          .filter(([, v]) => v > 0)
+          .sort(([, a], [, b]) => b - a)
+          .slice(0, 3)
+          .map(([k, v]) => (
+            <div key={k} className="flex justify-between text-[10px]">
+              <span className="text-slate-600">{ASSET_LABEL[k] ?? k}</span>
+              <span className={isSelected ? 'text-slate-300 font-medium' : 'text-slate-600'}>{v}%</span>
+            </div>
+          ))}
+        {Object.entries(targets).filter(([, v]) => v > 0).length > 3 && (
+          <p className="text-[10px] text-slate-700">+{Object.entries(targets).filter(([, v]) => v > 0).length - 3} more</p>
+        )}
+      </div>
+    </button>
+  );
+}
+
+// ── Framework snapshot strip ──────────────────────────────────────────────────
+function FrameworkStrip() {
+  const { analysis, confirmedRegime, status, lastUpdated, fetch } = useRegimeStore();
+  const bc     = analysis?.businessCycle;
+  const vol    = analysis?.volatility;
+  const liq    = analysis?.liquidity;
+  const credit = analysis?.creditCycle;
+
+  const lastUpdatedStr = lastUpdated
+    ? new Date(lastUpdated).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+    : null;
+
+  if (!analysis) {
+    return (
+      <div className="flex items-center justify-between bg-slate-800/40 border border-slate-700/30 rounded-xl px-4 py-3">
+        <p className="text-xs text-slate-500">Run regime detection to see live framework readings</p>
+        <button
+          onClick={fetch}
+          disabled={status === 'loading'}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600/80 hover:bg-blue-500 text-white text-xs font-medium transition-all disabled:opacity-50"
+        >
+          <RefreshCw size={11} className={status === 'loading' ? 'animate-spin' : ''} />
+          {status === 'loading' ? 'Detecting…' : 'Detect Now'}
+        </button>
+      </div>
+    );
+  }
+
+  const bwMeta   = REGIME_META[confirmedRegime];
+  const bcMeta   = bc     ? BUSINESS_CYCLE_META[bc.phase]   : null;
+  const volMeta  = vol    ? VOLATILITY_META[vol.level]       : null;
+  const liqMeta  = liq    ? LIQUIDITY_META[liq.level]        : null;
+  const credMeta = credit ? CREDIT_CYCLE_META[credit.phase]  : null;
+
+  return (
+    <div className="bg-slate-800/40 border border-slate-700/30 rounded-xl p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Live Framework Readings</p>
+        <div className="flex items-center gap-3">
+          {lastUpdatedStr && <span className="text-xs text-slate-600">{lastUpdatedStr}</span>}
+          <button
+            onClick={fetch}
+            disabled={status === 'loading'}
+            className="flex items-center gap-1 text-xs text-slate-500 hover:text-slate-300 transition-colors disabled:opacity-50"
+          >
+            <RefreshCw size={10} className={status === 'loading' ? 'animate-spin' : ''} />
+            Refresh
+          </button>
+        </div>
+      </div>
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-2">
+        {/* Bridgewater */}
+        <div className={`rounded-lg border px-3 py-2 ${bwMeta.bgColor} ${bwMeta.borderColor}`}>
+          <p className="text-[10px] text-slate-500 mb-0.5">Bridgewater</p>
+          <p className={`text-xs font-bold ${bwMeta.color}`}>{bwMeta.label}</p>
+          <p className="text-[10px] text-slate-600">{bwMeta.tagline}</p>
+        </div>
+        {/* Business Cycle */}
+        {bcMeta && (
+          <div className={`rounded-lg border px-3 py-2 ${bcMeta.bgColor} ${bcMeta.borderColor}`}>
+            <p className="text-[10px] text-slate-500 mb-0.5">Business Cycle</p>
+            <p className={`text-xs font-bold ${bcMeta.color}`}>{bc!.phase}</p>
+            <p className="text-[10px] text-slate-600">
+              {bc!.growthMomentum > 0.02 ? 'growth ↑' : bc!.growthMomentum < -0.02 ? 'growth ↓' : 'growth →'}
+            </p>
+          </div>
+        )}
+        {/* Volatility */}
+        {volMeta && (
+          <div className={`rounded-lg border px-3 py-2 ${volMeta.bgColor} ${volMeta.borderColor}`}>
+            <p className="text-[10px] text-slate-500 mb-0.5">Volatility</p>
+            <p className={`text-xs font-bold ${volMeta.color}`}>{vol!.level}</p>
+            <p className="text-[10px] text-slate-600">VIX {vol!.vix.toFixed(1)}</p>
+          </div>
+        )}
+        {/* Liquidity */}
+        {liqMeta && (
+          <div className={`rounded-lg border px-3 py-2 ${liqMeta.bgColor} ${liqMeta.borderColor}`}>
+            <p className="text-[10px] text-slate-500 mb-0.5">Liquidity</p>
+            <p className={`text-xs font-bold ${liqMeta.color}`}>{liq!.level}</p>
+            <p className="text-[10px] text-slate-600">score {liq!.score > 0 ? '+' : ''}{liq!.score}/±3</p>
+          </div>
+        )}
+        {/* Credit */}
+        {credMeta && (
+          <div className={`rounded-lg border px-3 py-2 ${credMeta.bgColor} ${credMeta.borderColor}`}>
+            <p className="text-[10px] text-slate-500 mb-0.5">Credit</p>
+            <p className={`text-xs font-bold ${credMeta.color}`}>{credit!.phase}</p>
+            <p className="text-[10px] text-slate-600">HY/IG {credit!.spreadTrend}</p>
+          </div>
+        )}
+      </div>
+      {/* Consensus */}
+      {analysis.consensus && (
+        <div className={`flex items-center justify-between rounded-lg px-3 py-2 border ${
+          analysis.consensus.riskBias === 'risk-on'  ? 'bg-emerald-500/10 border-emerald-500/20' :
+          analysis.consensus.riskBias === 'risk-off' ? 'bg-red-500/10 border-red-500/20'         :
+                                                       'bg-blue-500/10 border-blue-500/20'
+        }`}>
+          <div className="flex items-center gap-2">
+            <p className="text-xs text-slate-500">Consensus:</p>
+            <p className={`text-xs font-bold ${
+              analysis.consensus.riskBias === 'risk-on'  ? 'text-emerald-400' :
+              analysis.consensus.riskBias === 'risk-off' ? 'text-red-400'     : 'text-blue-400'
+            }`}>
+              {analysis.consensus.riskBias === 'risk-on' ? 'Risk-On' :
+               analysis.consensus.riskBias === 'risk-off' ? 'Risk-Off' : 'Balanced'}
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <p className="text-xs text-slate-600">Conviction</p>
+            <div className="w-20 h-1.5 bg-slate-700 rounded-full overflow-hidden">
+              <div className="h-full rounded-full"
+                style={{
+                  width: `${analysis.consensus.conviction * 100}%`,
+                  backgroundColor:
+                    analysis.consensus.riskBias === 'risk-on'  ? '#10b981' :
+                    analysis.consensus.riskBias === 'risk-off' ? '#ef4444' : '#3b82f6',
+                }} />
+            </div>
+            <p className="text-xs text-slate-500">{(analysis.consensus.conviction * 100).toFixed(0)}%</p>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Main component ────────────────────────────────────────────────────────────
 export function TargetsTab() {
   const {
     holdings: allHoldings, settings, exchangeRates,
     activePortfolio, updateSettings,
   } = usePortfolioStore();
+  const { confirmedRegime, analysis } = useRegimeStore();
 
-  const holdings  = filterByPortfolio(allHoldings, activePortfolio);
-  const base      = settings.baseCurrency;
-  const fmt       = (n: number) => fmtBase(n, base);
-  const conv      = (amt: number, ccy: Currency) => toBase(amt, ccy, exchangeRates, base);
-  const targets   = settings.targetAllocations;
-  const regime    = settings.marketRegime ?? 'balanced';
+  const holdings    = filterByPortfolio(allHoldings, activePortfolio);
+  const base        = settings.baseCurrency;
+  const fmt         = (n: number) => fmtBase(n, base);
+  const conv        = (amt: number, ccy: Currency) => toBase(amt, ccy, exchangeRates, base);
+  const targets     = settings.targetAllocations;
+  const regime      = settings.marketRegime;
   const neutralMode = settings.neutralColorMode;
 
   const totalValue = holdings.reduce((s, h) => s + conv(h.quantity * h.currentPrice, h.currency), 0);
 
-  // Current allocation %
   const currentAlloc = holdings.reduce<Record<string, number>>((acc, h) => {
     acc[h.assetClass] = (acc[h.assetClass] ?? 0) + conv(h.quantity * h.currentPrice, h.currency);
     return acc;
@@ -146,15 +324,15 @@ export function TargetsTab() {
     ALL_CLASSES.map(cls => [cls, totalValue > 0 ? (currentAlloc[cls] ?? 0) / totalValue * 100 : 0])
   ) as Record<AssetClass, number>;
 
-  // Which classes are relevant (present in portfolio OR have a target set)
   const relevantClasses = ALL_CLASSES.filter(
     cls => (currentPct[cls] ?? 0) > 0.1 || (targets[cls] ?? 0) > 0
   );
 
-  const applyRegime = (r: Regime) => {
+  const applyRegime = (r: RegimeName) => {
+    const regimeTargets = REGIME_META[r].targets as Partial<Record<AssetClass, number>>;
     updateSettings({
       marketRegime: r,
-      targetAllocations: { ...ZERO_ALLOCS, ...REGIME_PRESETS[r] },
+      targetAllocations: { ...ZERO_ALLOCS, ...regimeTargets },
     });
   };
 
@@ -170,32 +348,59 @@ export function TargetsTab() {
     return v > 0 ? 'text-emerald-400' : 'text-red-400';
   };
 
+  // Is the detected regime different from the selected one?
+  const detectedIsLive  = confirmedRegime !== 'UNKNOWN';
+  const detectedMismatch = detectedIsLive && regime !== confirmedRegime;
+
   return (
     <div className="space-y-6">
 
-      {/* Market regime selector */}
+      {/* Live framework readings strip */}
+      <FrameworkStrip />
+
+      {/* Mismatch nudge */}
+      {detectedMismatch && (
+        <div className="flex items-center justify-between gap-4 bg-amber-500/10 border border-amber-500/30 rounded-xl px-4 py-3">
+          <div>
+            <p className="text-xs font-semibold text-amber-400 mb-0.5">Detected regime differs from selected</p>
+            <p className="text-xs text-slate-500">
+              Live detection: <span className={`font-semibold ${REGIME_META[confirmedRegime].color}`}>{REGIME_META[confirmedRegime].label}</span>
+              {regime && (
+                <> · Target set for: <span className={`font-semibold ${REGIME_META[regime].color}`}>{REGIME_META[regime].label}</span></>
+              )}
+            </p>
+          </div>
+          <button
+            onClick={() => applyRegime(confirmedRegime)}
+            className="flex-shrink-0 px-3 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 text-xs font-semibold transition-colors"
+          >
+            Apply {REGIME_META[confirmedRegime].label}
+          </button>
+        </div>
+      )}
+
+      {/* Regime selector */}
       <div className="bg-slate-800/60 rounded-xl border border-slate-700/50 p-5">
-        <h3 className="text-sm font-semibold text-slate-300 mb-1">Market Regime</h3>
+        <h3 className="text-sm font-semibold text-slate-300 mb-1">Select Regime</h3>
         <p className="text-xs text-slate-500 mb-4">
-          Select a regime to load suggested target allocations, then drag segments or use sliders to customise.
+          Each regime loads its suggested target allocations. Customise further with the sliders below.
         </p>
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
-          {(Object.keys(REGIME_LABELS) as Regime[]).map((r) => (
-            <button
+        <div className="grid grid-cols-2 lg:grid-cols-5 gap-2">
+          {SELECTABLE_REGIMES.map(r => (
+            <RegimeCard
               key={r}
+              regime={r}
+              isSelected={regime === r}
+              isDetected={confirmedRegime === r && confirmedRegime !== 'UNKNOWN'}
               onClick={() => applyRegime(r)}
-              className={`px-3 py-2.5 rounded-lg text-xs font-semibold border transition-all text-left ${
-                regime === r
-                  ? 'bg-blue-600 border-blue-500 text-white'
-                  : 'bg-slate-800 border-slate-700 text-slate-400 hover:border-slate-500 hover:text-slate-200'
-              }`}
-            >
-              <p>{REGIME_LABELS[r]}</p>
-            </button>
+            />
           ))}
         </div>
         {regime && (
-          <p className="mt-3 text-xs text-slate-500 italic">{REGIME_DESC[regime]}</p>
+          <div className="mt-4 bg-slate-900/40 rounded-lg px-4 py-3">
+            <p className={`text-xs font-semibold mb-1 ${REGIME_META[regime].color}`}>{REGIME_META[regime].label} — Strategy</p>
+            <p className="text-xs text-slate-400 leading-relaxed">{REGIME_META[regime].description}</p>
+          </div>
         )}
       </div>
 
@@ -203,7 +408,6 @@ export function TargetsTab() {
       <div className="bg-slate-800/60 rounded-xl border border-slate-700/50 p-5 space-y-4">
         <h3 className="text-sm font-semibold text-slate-300">Allocation Comparison</h3>
 
-        {/* Current */}
         <div>
           <p className="text-xs text-slate-500 mb-1.5">Current</p>
           <div className="flex h-8 rounded-lg overflow-hidden">
@@ -224,10 +428,11 @@ export function TargetsTab() {
           </div>
         </div>
 
-        {/* Target — draggable */}
         <div>
           <div className="flex items-center justify-between mb-1.5">
-            <p className="text-xs text-slate-500">Target</p>
+            <p className="text-xs text-slate-500">
+              Target{regime ? ` — ${REGIME_META[regime].label}` : ''}
+            </p>
             {Math.abs(totalTarget - 100) > 1 && (
               <span className="text-xs text-amber-400">
                 Total: {totalTarget}% — adjust to reach 100%
@@ -247,7 +452,7 @@ export function TargetsTab() {
       <div className="bg-slate-800/60 rounded-xl border border-slate-700/50 overflow-hidden">
         <div className="px-5 py-3 border-b border-slate-700/50">
           <p className="text-sm font-semibold text-slate-300">Target Allocation</p>
-          <p className="text-xs text-slate-500 mt-0.5">Drag the sliders below to fine-tune each class.</p>
+          <p className="text-xs text-slate-500 mt-0.5">Drag sliders to fine-tune each asset class.</p>
         </div>
         <div className="divide-y divide-slate-700/20">
           {relevantClasses.map(cls => {
@@ -256,13 +461,10 @@ export function TargetsTab() {
             const gap  = curr - tgt;
             return (
               <div key={cls} className="px-5 py-3 flex items-center gap-4">
-                {/* Color dot + label */}
                 <div className="flex items-center gap-2 w-28 flex-shrink-0">
                   <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: ASSET_COLORS[cls] }} />
                   <span className="text-sm text-slate-300">{ASSET_LABEL[cls]}</span>
                 </div>
-
-                {/* Slider */}
                 <input
                   type="range"
                   min={0}
@@ -273,18 +475,8 @@ export function TargetsTab() {
                   className="flex-1 h-1.5 rounded-full appearance-none cursor-pointer"
                   style={{ accentColor: ASSET_COLORS[cls] }}
                 />
-
-                {/* Target % */}
-                <span className="text-sm font-semibold text-slate-200 tabular-nums w-10 text-right">
-                  {tgt}%
-                </span>
-
-                {/* Current % */}
-                <span className="text-xs text-slate-500 tabular-nums w-14 text-right">
-                  now {curr.toFixed(1)}%
-                </span>
-
-                {/* Gap */}
+                <span className="text-sm font-semibold text-slate-200 tabular-nums w-10 text-right">{tgt}%</span>
+                <span className="text-xs text-slate-500 tabular-nums w-14 text-right">now {curr.toFixed(1)}%</span>
                 <span className={`text-xs font-semibold tabular-nums w-16 text-right ${gainColor(gap)}`}>
                   {Math.abs(gap) < 0.5 ? '✓' : `${gap > 0 ? '+' : ''}${gap.toFixed(1)}%`}
                 </span>
@@ -294,7 +486,7 @@ export function TargetsTab() {
         </div>
       </div>
 
-      {/* Action items */}
+      {/* Rebalancing actions */}
       {relevantClasses.some(cls => Math.abs((currentPct[cls] ?? 0) - (targets[cls] ?? 0)) >= 3) && (
         <div className="bg-slate-800/60 rounded-xl border border-slate-700/50 p-5">
           <h3 className="text-sm font-semibold text-slate-300 mb-3">Rebalancing Actions</h3>
@@ -315,13 +507,11 @@ export function TargetsTab() {
                     <span className="text-slate-300">
                       <span className={gap > 0
                         ? (neutralMode ? 'text-amber-400' : 'text-red-400')
-                        : (neutralMode ? 'text-blue-400' : 'text-emerald-400')
+                        : (neutralMode ? 'text-blue-400'  : 'text-emerald-400')
                       }>{action}</span>
                       {' '}{ASSET_LABEL[cls]} by ~{Math.abs(gap).toFixed(1)}%
                     </span>
-                    <span className="text-xs text-slate-500">
-                      (~{fmt(absGapVal)})
-                    </span>
+                    <span className="text-xs text-slate-500">(~{fmt(absGapVal)})</span>
                   </div>
                 );
               })}

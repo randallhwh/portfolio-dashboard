@@ -86,5 +86,5 @@ export interface PortfolioSettings {
   benchmarkTicker: string;
   targetAllocations: Record<AssetClass, number>;
   riskTolerance: 'conservative' | 'moderate' | 'aggressive';
-  marketRegime?: 'risk-on' | 'balanced' | 'defensive' | 'stagflation';
+  marketRegime?: 'GOLDILOCKS' | 'REFLATION' | 'STAGFLATION' | 'RECESSION' | 'RISK_OFF_SPIKE';
 }
