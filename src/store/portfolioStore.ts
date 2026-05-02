@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import type { Holding, Transaction, TradeInput, PortfolioSettings, PortfolioSnapshot, BiasAlert, Currency, ExchangeRates } from '../types/portfolio';
+import type { Holding, Transaction, TradeInput, PortfolioSettings, PortfolioSnapshot, BiasAlert, Currency, ExchangeRates, OHLCVBar } from '../types/portfolio';
 import { fetchQuotes, FX_SYMBOLS } from '../services/yahooFinance';
 
 // Converts amount in `currency` to the base currency.
@@ -38,7 +38,8 @@ interface PortfolioState {
   // All rates expressed as "how many USD does 1 unit of this currency equal"
   // e.g. SGD: 0.746 means 1 SGD = 0.746 USD
   exchangeRates: ExchangeRates;
-  activeView: 'dashboard' | 'holdings' | 'bias' | 'analytics' | 'returns' | 'regime';
+  activeView: 'dashboard' | 'holdings' | 'bias' | 'analytics' | 'returns' | 'regime' | 'signals';
+  ohlcvData: Record<string, OHLCVBar[]>;
   activePortfolio: string; // 'all' or an account name
   priceHistory: Record<string, { prev1d?: number; prev7d?: number; prev30d?: number; prevYtd?: number }>;
   priceStatus: 'idle' | 'loading' | 'success' | 'error';
@@ -460,6 +461,7 @@ export const usePortfolioStore = create<PortfolioState>()(
       activeView: 'dashboard',
       activePortfolio: 'Liquid',
       priceHistory: {},
+      ohlcvData: {},
       priceStatus: 'idle' as const,
       lastUpdated: null,
 
@@ -631,16 +633,23 @@ export const usePortfolioStore = create<PortfolioState>()(
           const priceMap: Record<string, number> = {};
           const yieldMap: Record<string, number> = {};
           const historyMap: Record<string, { prev1d?: number; prev7d?: number; prev30d?: number }> = {};
+          const newOhlcv: Record<string, OHLCVBar[]> = {};
+          const holdingTickerSet = new Set(holdingTickers);
           results.forEach((r) => {
             priceMap[r.symbol] = r.price;
             if (r.dividendYieldPct !== undefined) yieldMap[r.symbol] = r.dividendYieldPct;
             if (r.prev1d != null || r.prev7d != null || r.prev30d != null || r.prevYtd != null) {
               historyMap[r.symbol] = { prev1d: r.prev1d, prev7d: r.prev7d, prev30d: r.prev30d, prevYtd: r.prevYtd };
             }
+            // Only store OHLCV for actual holdings (not FX pairs)
+            if (holdingTickerSet.has(r.symbol) && r.ohlcv && r.ohlcv.length > 0) {
+              newOhlcv[r.symbol] = r.ohlcv;
+            }
           });
 
           set((state) => ({
             priceHistory: { ...state.priceHistory, ...historyMap },
+            ohlcvData: { ...state.ohlcvData, ...newOhlcv },
             holdings: state.holdings.map((h) => {
               if (h.assetClass === 'cash') return h; // never overwrite cash price or yield
               const updates: Partial<Holding> = {};
@@ -717,7 +726,7 @@ export const usePortfolioStore = create<PortfolioState>()(
     }),
     {
       name: 'portfolio-store',
-      version: 13,
+      version: 14,
       migrate: () => ({
         holdings: INITIAL_HOLDINGS,
         transactions: [],
@@ -745,7 +754,14 @@ export const usePortfolioStore = create<PortfolioState>()(
         activeView: 'dashboard' as const,
         activePortfolio: 'Liquid',
         priceHistory: {},
+        ohlcvData: {},
       }),
+      // ohlcvData is in-memory only (can be large; regenerated on next price refresh)
+      partialize: (state: PortfolioState) => {
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        const { ohlcvData: _ohlcv, ...rest } = state;
+        return rest;
+      },
     }
   )
 );

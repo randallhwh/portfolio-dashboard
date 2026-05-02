@@ -6,6 +6,7 @@ import { BiasCheck } from './pages/BiasCheck';
 import { Analytics } from './pages/Analytics';
 import { Returns } from './pages/Returns';
 import { Regime } from './pages/Regime';
+import { Signals } from './pages/Signals';
 import { usePortfolioStore } from './store/portfolioStore';
 
 export default function App() {
@@ -23,6 +24,7 @@ export default function App() {
           {activeView === 'returns'   && <Returns />}
           {activeView === 'analytics' && <Analytics />}
           {activeView === 'regime'    && <Regime />}
+          {activeView === 'signals'   && <Signals />}
         </div>
       </main>
     </div>

@@ -1,3 +1,5 @@
+import type { OHLCVBar } from '../types/portfolio';
+
 export interface QuoteResult {
   symbol: string;
   price: number;
@@ -8,6 +10,7 @@ export interface QuoteResult {
   prev7d?: number;   // ~7 calendar days ago close
   prev30d?: number;  // ~30 calendar days ago close
   prevYtd?: number;  // first trading day of the current calendar year
+  ohlcv?: OHLCVBar[]; // full 6-month daily bars for technical analysis
 }
 
 // FX symbols: how many USD = 1 unit of this currency
@@ -56,8 +59,27 @@ async function fetchSingle(symbol: string): Promise<QuoteResult | null> {
       typeof rawYield === 'number' && rawYield > 0 ? rawYield * 100 : undefined;
 
     const timestamps: number[] = result.timestamp ?? [];
-    const closes: (number | null)[] = result.indicators?.quote?.[0]?.close ?? [];
+    const quote0 = result.indicators?.quote?.[0] ?? {};
+    const closes: (number | null)[] = quote0.close ?? [];
+    const opens:  (number | null)[] = quote0.open  ?? [];
+    const highs:  (number | null)[] = quote0.high  ?? [];
+    const lows:   (number | null)[] = quote0.low   ?? [];
+    const vols:   (number | null)[] = quote0.volume ?? [];
     const now = Date.now() / 1000;
+
+    const ohlcv: OHLCVBar[] = [];
+    for (let i = 0; i < timestamps.length; i++) {
+      const o = opens[i], h = highs[i], l = lows[i], c = closes[i];
+      if (o == null || h == null || l == null || c == null) continue;
+      ohlcv.push({
+        date:   new Date(timestamps[i] * 1000).toISOString().split('T')[0],
+        open:   o,
+        high:   h,
+        low:    l,
+        close:  c,
+        volume: (vols[i] ?? 0) as number,
+      });
+    }
 
     const yearStartTs = new Date(new Date().getFullYear(), 0, 1).getTime() / 1000;
 
@@ -76,6 +98,7 @@ async function fetchSingle(symbol: string): Promise<QuoteResult | null> {
       prev7d,
       prev30d,
       prevYtd,
+      ohlcv: ohlcv.length > 0 ? ohlcv : undefined,
     };
   } catch {
     return null;

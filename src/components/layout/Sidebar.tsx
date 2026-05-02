@@ -1,4 +1,4 @@
-import { LayoutDashboard, Briefcase, Brain, BarChart2, Settings, TrendingUp, Layers, Banknote, Lock, Activity, Radar } from 'lucide-react';
+import { LayoutDashboard, Briefcase, Brain, BarChart2, Settings, TrendingUp, Layers, Banknote, Lock, Activity, Radar, Zap } from 'lucide-react';
 import { usePortfolioStore } from '../../store/portfolioStore';
 
 const NAV_ITEMS = [
@@ -8,6 +8,7 @@ const NAV_ITEMS = [
   { id: 'bias'     as const, label: 'Bias Check',  icon: Brain           },
   { id: 'analytics' as const, label: 'Analytics',  icon: BarChart2       },
   { id: 'regime'    as const, label: 'Regime',     icon: Radar           },
+  { id: 'signals'   as const, label: 'Signals',    icon: Zap             },
 ];
 
 export function Sidebar() {

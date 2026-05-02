@@ -79,6 +79,49 @@ export interface PortfolioSnapshot {
   totalValue: number;
 }
 
+export interface OHLCVBar {
+  date: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+export type SignalRating = 'STRONG_BUY' | 'BUY' | 'NEUTRAL' | 'SELL' | 'STRONG_SELL';
+
+export interface TechnicalSignals {
+  ticker: string;
+  computedAt: string;
+  barsAvailable: number;
+  score: number;
+  rating: SignalRating;
+  trendScore: number;
+  momentumScore: number;
+  volatilityScore: number;
+  volumeScore: number;
+  rsi: number | null;
+  macd: number | null;
+  macdSignal: number | null;
+  macdHistogram: number | null;
+  sma20: number | null;
+  sma50: number | null;
+  bbUpper: number | null;
+  bbMiddle: number | null;
+  bbLower: number | null;
+  bbBandwidth: number | null;
+  atr: number | null;
+  volumeRatio: number | null;
+  goldenCross: boolean;
+  deathCross: boolean;
+  bbSqueeze: boolean;
+  oversold: boolean;
+  overbought: boolean;
+  suggestedStop: number | null;
+  tier1Target: number | null;
+  tier2Target: number | null;
+}
+
 export interface PortfolioSettings {
   baseCurrency: Currency;
   showCostBasis: boolean; // "cost blindfold" toggle
