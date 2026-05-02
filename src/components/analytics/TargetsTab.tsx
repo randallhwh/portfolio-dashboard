@@ -311,7 +311,10 @@ export function TargetsTab() {
   const fmt         = (n: number) => fmtBase(n, base);
   const conv        = (amt: number, ccy: Currency) => toBase(amt, ccy, exchangeRates, base);
   const targets     = settings.targetAllocations;
-  const regime      = settings.marketRegime;
+  // Guard against stale persisted values from before the regime type was updated
+  const regime      = SELECTABLE_REGIMES.includes(settings.marketRegime as RegimeName)
+    ? settings.marketRegime as RegimeName
+    : undefined;
   const neutralMode = settings.neutralColorMode;
 
   const totalValue = holdings.reduce((s, h) => s + conv(h.quantity * h.currentPrice, h.currency), 0);
