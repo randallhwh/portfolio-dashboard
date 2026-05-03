@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import type { Holding, Transaction, TradeInput, PortfolioSettings, PortfolioSnapshot, BiasAlert, Currency, ExchangeRates, OHLCVBar } from '../types/portfolio';
+import type { Holding, Transaction, TradeInput, PortfolioSettings, PortfolioSnapshot, BiasAlert, Currency, ExchangeRates, OHLCVBar, WatchlistEntry } from '../types/portfolio';
 import { fetchQuotes, FX_SYMBOLS } from '../services/yahooFinance';
 
 // Converts amount in `currency` to the base currency.
@@ -40,6 +40,7 @@ interface PortfolioState {
   exchangeRates: ExchangeRates;
   activeView: 'dashboard' | 'holdings' | 'bias' | 'analytics' | 'returns' | 'regime' | 'signals';
   ohlcvData: Record<string, OHLCVBar[]>;
+  watchlist: WatchlistEntry[];
   activePortfolio: string; // 'all' or an account name
   priceHistory: Record<string, { prev1d?: number; prev7d?: number; prev30d?: number; prevYtd?: number }>;
   priceStatus: 'idle' | 'loading' | 'success' | 'error';
@@ -57,6 +58,8 @@ interface PortfolioState {
   updateYield: (id: string, annualYieldPct: number | undefined) => void;
   updateExchangeRate: (currency: Currency, rate: number) => void;
   fetchLivePrices: () => Promise<void>;
+  addToWatchlist: (ticker: string) => Promise<{ success: boolean; error?: string }>;
+  removeFromWatchlist: (ticker: string) => void;
   saveSnapshot: () => void;
 
   getBiasAlerts: () => BiasAlert[];
@@ -462,6 +465,7 @@ export const usePortfolioStore = create<PortfolioState>()(
       activePortfolio: 'Liquid',
       priceHistory: {},
       ohlcvData: {},
+      watchlist: [],
       priceStatus: 'idle' as const,
       lastUpdated: null,
 
@@ -608,12 +612,13 @@ export const usePortfolioStore = create<PortfolioState>()(
         })),
 
       fetchLivePrices: async () => {
-        const { holdings } = get();
+        const { holdings, watchlist } = get();
         set({ priceStatus: 'loading' });
 
         try {
-          // Collect all holding tickers + FX symbols for currencies in use
+          // Collect all holding tickers + watchlist tickers + FX symbols
           const holdingTickers = [...new Set(holdings.map((h) => h.ticker))];
+          const watchlistTickers = watchlist.map((w) => w.ticker);
           const usedCurrencies = [...new Set(holdings.map((h) => h.currency))].filter(
             (c) => c !== 'USD'
           ) as Array<keyof typeof FX_SYMBOLS>;
@@ -621,7 +626,7 @@ export const usePortfolioStore = create<PortfolioState>()(
             .map((c) => FX_SYMBOLS[c])
             .filter(Boolean);
 
-          const allSymbols = [...holdingTickers, ...fxTickers];
+          const allSymbols = [...new Set([...holdingTickers, ...watchlistTickers, ...fxTickers])];
           const results = await fetchQuotes(allSymbols);
 
           if (results.length === 0) {
@@ -635,14 +640,15 @@ export const usePortfolioStore = create<PortfolioState>()(
           const historyMap: Record<string, { prev1d?: number; prev7d?: number; prev30d?: number }> = {};
           const newOhlcv: Record<string, OHLCVBar[]> = {};
           const holdingTickerSet = new Set(holdingTickers);
+          const watchlistTickerSet = new Set(watchlistTickers);
           results.forEach((r) => {
             priceMap[r.symbol] = r.price;
             if (r.dividendYieldPct !== undefined) yieldMap[r.symbol] = r.dividendYieldPct;
             if (r.prev1d != null || r.prev7d != null || r.prev30d != null || r.prevYtd != null) {
               historyMap[r.symbol] = { prev1d: r.prev1d, prev7d: r.prev7d, prev30d: r.prev30d, prevYtd: r.prevYtd };
             }
-            // Only store OHLCV for actual holdings (not FX pairs)
-            if (holdingTickerSet.has(r.symbol) && r.ohlcv && r.ohlcv.length > 0) {
+            // Store OHLCV for holdings and watchlist (not FX pairs)
+            if ((holdingTickerSet.has(r.symbol) || watchlistTickerSet.has(r.symbol)) && r.ohlcv && r.ohlcv.length > 0) {
               newOhlcv[r.symbol] = r.ohlcv;
             }
           });
@@ -671,12 +677,49 @@ export const usePortfolioStore = create<PortfolioState>()(
                   .filter(Boolean) as [string, number][]
               ),
             },
+            // Refresh watchlist current prices
+            watchlist: watchlist.map((w) =>
+              priceMap[w.ticker] != null ? { ...w, currentPrice: priceMap[w.ticker] } : w
+            ),
             priceStatus: 'success',
             lastUpdated: new Date().toISOString(),
           }));
         } catch {
           set({ priceStatus: 'error' });
         }
+      },
+
+      addToWatchlist: async (ticker: string) => {
+        const upper = ticker.trim().toUpperCase();
+        const { watchlist } = get();
+        if (watchlist.some((w) => w.ticker === upper)) {
+          return { success: false, error: `${upper} is already in the watchlist` };
+        }
+        const results = await fetchQuotes([upper]);
+        const r = results[0];
+        if (!r || r.symbol !== upper) {
+          return { success: false, error: `No data found for "${upper}" — check the ticker symbol` };
+        }
+        const entry: WatchlistEntry = {
+          ticker: upper,
+          name: r.name ?? upper,
+          currency: (r.currency as WatchlistEntry['currency']) ?? 'USD',
+          currentPrice: r.price,
+          addedAt: new Date().toISOString(),
+        };
+        set((state) => ({
+          watchlist: [...state.watchlist, entry],
+          ohlcvData: r.ohlcv && r.ohlcv.length > 0
+            ? { ...state.ohlcvData, [upper]: r.ohlcv }
+            : state.ohlcvData,
+        }));
+        return { success: true };
+      },
+
+      removeFromWatchlist: (ticker: string) => {
+        set((state) => ({
+          watchlist: state.watchlist.filter((w) => w.ticker !== ticker),
+        }));
       },
 
       saveSnapshot: () => {
@@ -726,7 +769,7 @@ export const usePortfolioStore = create<PortfolioState>()(
     }),
     {
       name: 'portfolio-store',
-      version: 14,
+      version: 15,
       migrate: () => ({
         holdings: INITIAL_HOLDINGS,
         transactions: [],
@@ -755,6 +798,7 @@ export const usePortfolioStore = create<PortfolioState>()(
         activePortfolio: 'Liquid',
         priceHistory: {},
         ohlcvData: {},
+        watchlist: [],
       }),
       // ohlcvData is in-memory only (can be large; regenerated on next price refresh)
       partialize: (state: PortfolioState) => {

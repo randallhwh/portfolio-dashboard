@@ -122,6 +122,14 @@ export interface TechnicalSignals {
   tier2Target: number | null;
 }
 
+export interface WatchlistEntry {
+  ticker: string;
+  name: string;
+  currency: Currency;
+  currentPrice: number;
+  addedAt: string;
+}
+
 export interface PortfolioSettings {
   baseCurrency: Currency;
   showCostBasis: boolean; // "cost blindfold" toggle
