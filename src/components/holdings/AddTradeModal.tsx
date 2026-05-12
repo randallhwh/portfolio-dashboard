@@ -6,6 +6,9 @@ import type { AssetClass, Currency } from '../../types/portfolio';
 interface Props {
   onClose: () => void;
   defaultTicker?: string;
+  defaultSide?: 'buy' | 'sell';
+  defaultAssetClass?: AssetClass;
+  defaultAccount?: string;
 }
 
 const ASSET_CLASSES: AssetClass[] = ['stock', 'etf', 'bond', 'cash', 'real_estate', 'crypto', 'commodity', 'other'];
@@ -13,24 +16,28 @@ const CURRENCIES: Currency[] = ['USD', 'SGD', 'JPY', 'HKD', 'CNY', 'CAD', 'EUR',
 
 const today = new Date().toISOString().split('T')[0];
 
-export function AddTradeModal({ onClose, defaultTicker }: Props) {
+export function AddTradeModal({ onClose, defaultTicker, defaultSide = 'buy', defaultAssetClass = 'stock', defaultAccount }: Props) {
   const { holdings, settings, exchangeRates, recordTrade } = usePortfolioStore();
   const base = settings.baseCurrency;
+  const initialHolding = defaultTicker
+    ? holdings.find((h) => h.ticker.toLowerCase() === defaultTicker.trim().toLowerCase())
+    : undefined;
 
-  const [side, setSide] = useState<'buy' | 'sell'>('buy');
+  const [side, setSide] = useState<'buy' | 'sell'>(defaultSide);
   const [ticker, setTicker] = useState(defaultTicker ?? '');
-  const [name, setName] = useState('');
-  const [assetClass, setAssetClass] = useState<AssetClass>('stock');
+  const [name, setName] = useState(initialHolding?.name ?? '');
+  const [assetClass, setAssetClass] = useState<AssetClass>(initialHolding?.assetClass ?? defaultAssetClass);
   const [qty, setQty] = useState('');
-  const [price, setPrice] = useState('');
+  const [price, setPrice] = useState(initialHolding && defaultSide === 'sell' ? initialHolding.currentPrice.toString() : '');
   const [commission, setCommission] = useState('0');
   const [date, setDate] = useState(today);
-  const [currency, setCurrency] = useState<Currency>(base === 'SGD' ? 'SGD' : 'USD');
-  const [account, setAccount] = useState('');
-  const [sector, setSector] = useState('');
-  const [country, setCountry] = useState('');
+  const [currency, setCurrency] = useState<Currency>(initialHolding?.currency ?? (base === 'SGD' ? 'SGD' : 'USD'));
+  const [account, setAccount] = useState(initialHolding?.account ?? defaultAccount ?? '');
+  const [sector, setSector] = useState(initialHolding?.sector ?? '');
+  const [country, setCountry] = useState(initialHolding?.country ?? '');
   const [notes, setNotes] = useState('');
   const [annualYieldPct, setAnnualYieldPct] = useState('');
+  const [cashHoldingId, setCashHoldingId] = useState('');
   const [error, setError] = useState('');
 
   const existingAccounts = useMemo(() => [...new Set(holdings.map((h) => h.account))], [holdings]);
@@ -73,6 +80,8 @@ export function AddTradeModal({ onClose, defaultTicker }: Props) {
       if (side === 'sell') setPrice(matched.currentPrice.toString());
     }
   };
+
+  const cashHoldings = holdings.filter((h) => h.assetClass === 'cash' && h.currency === currency);
 
   const isCash = assetClass === 'cash';
 
@@ -138,6 +147,7 @@ export function AddTradeModal({ onClose, defaultTicker }: Props) {
       country: country || undefined,
       notes: notes || undefined,
       annualYieldPct: !isNaN(yieldNum) && yieldNum >= 0 ? yieldNum : undefined,
+      cashHoldingId: !isCash && cashHoldingId ? cashHoldingId : undefined,
     });
     if (result.success) {
       onClose();
@@ -401,6 +411,44 @@ export function AddTradeModal({ onClose, defaultTicker }: Props) {
             <input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Optional" className={inputCls} />
           </div>
 
+          {/* Cash balance update */}
+          {!isCash && cashHoldings.length > 0 && (
+            <div className="bg-slate-800/60 rounded-xl border border-slate-700/50 px-4 py-3 space-y-2">
+              <p className="text-xs font-medium text-slate-400">
+                Update cash balance <span className="text-slate-600 font-normal">(optional)</span>
+              </p>
+              <select
+                value={cashHoldingId}
+                onChange={(e) => setCashHoldingId(e.target.value)}
+                className={inputCls}
+              >
+                <option value="">— no cash update —</option>
+                {cashHoldings.map((h) => (
+                  <option key={h.id} value={h.id}>
+                    {h.name} · {currency} {h.quantity.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                  </option>
+                ))}
+              </select>
+              {cashHoldingId && qtyNum > 0 && priceNum > 0 && (() => {
+                const ch = cashHoldings.find((h) => h.id === cashHoldingId)!;
+                const delta = side === 'buy'
+                  ? -(qtyNum * priceNum + commNum)
+                  : qtyNum * priceNum - commNum;
+                const after = ch.quantity + delta;
+                return (
+                  <p className="text-xs text-slate-400">
+                    {ch.name}: {currency} {ch.quantity.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                    {' → '}
+                    <span className={after < 0 ? 'text-red-400 font-semibold' : 'text-slate-200 font-semibold'}>
+                      {currency} {after.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                    </span>
+                    {after < 0 && <span className="text-red-400 ml-1">(insufficient funds)</span>}
+                  </p>
+                );
+              })()}
+            </div>
+          )}
+
           {/* Trade preview */}
           {preview && qtyNum > 0 && priceNum > 0 && (
             <div className={`rounded-xl border px-4 py-3 ${isBuy ? 'border-blue-500/30 bg-blue-500/5' : 'border-red-500/30 bg-red-500/5'}`}>
@@ -419,7 +467,7 @@ export function AddTradeModal({ onClose, defaultTicker }: Props) {
                   <div>
                     <p className="text-xs text-slate-500">New avg cost</p>
                     <p className="font-semibold text-slate-200">
-                      {currency} {preview.newAvg.toLocaleString(undefined, { maximumFractionDigits: 4 })}
+                      {currency} {(preview.newAvg ?? 0).toLocaleString(undefined, { maximumFractionDigits: 4 })}
                       {preview.prevQty > 0 && (
                         <span className="text-xs text-slate-500 ml-1">
                           (was {preview.prevAvg.toLocaleString(undefined, { maximumFractionDigits: 4 })})

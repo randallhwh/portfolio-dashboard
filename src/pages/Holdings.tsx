@@ -1,9 +1,9 @@
 import { useState } from 'react';
-import { Plus, Edit2, Trash2, TrendingUp, TrendingDown, ChevronUp, ChevronDown, ArrowLeftRight } from 'lucide-react';
+import { Plus, Edit2, Trash2, TrendingUp, TrendingDown, ChevronUp, ChevronDown, ArrowLeftRight, Wallet } from 'lucide-react';
 import { usePortfolioStore, toBase, fmtBase, filterByPortfolio } from '../store/portfolioStore';
 import { AddTradeModal } from '../components/holdings/AddTradeModal';
 import { EditHoldingModal } from '../components/holdings/EditHoldingModal';
-import type { Holding } from '../types/portfolio';
+import type { AssetClass, Holding } from '../types/portfolio';
 
 type SortKey = 'ticker' | 'valueBase' | 'gainPct' | 'portfolioPct' | 'holdDays';
 type SortDir = 'asc' | 'desc';
@@ -20,10 +20,12 @@ const ASSET_CLASS_BADGE: Record<string, string> = {
 };
 
 export function Holdings() {
-  const { holdings: allHoldings, settings, exchangeRates, deleteHolding, updateCurrentPrice, updateYield, activePortfolio } = usePortfolioStore();
+  const { holdings: allHoldings, settings, exchangeRates, deleteHolding, updateCurrentPrice, updateYield, updateHolding, activePortfolio } = usePortfolioStore();
   const holdings = filterByPortfolio(allHoldings, activePortfolio);
   const [showTradeModal, setShowTradeModal] = useState(false);
   const [tradeDefaultTicker, setTradeDefaultTicker] = useState<string | undefined>();
+  const [tradeDefaultSide, setTradeDefaultSide] = useState<'buy' | 'sell'>('buy');
+  const [tradeDefaultAssetClass, setTradeDefaultAssetClass] = useState<AssetClass>('stock');
   const [editHolding, setEditHolding] = useState<Holding | undefined>();
   const [sortKey, setSortKey] = useState<SortKey>('valueBase');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
@@ -31,6 +33,8 @@ export function Holdings() {
   const [priceInput, setPriceInput] = useState('');
   const [editYieldId, setEditYieldId] = useState<string | null>(null);
   const [yieldInput, setYieldInput] = useState('');
+  const [editBalanceId, setEditBalanceId] = useState<string | null>(null);
+  const [balanceInput, setBalanceInput] = useState('');
 
   const base = settings.baseCurrency;
   const conv = (amount: number, ccy: typeof base) => toBase(amount, ccy, exchangeRates, base);
@@ -83,8 +87,16 @@ export function Holdings() {
     setEditYieldId(null);
   };
 
-  const openBuyFor = (ticker: string) => {
+  const handleBalanceSave = (id: string) => {
+    const balance = parseFloat(balanceInput);
+    if (!isNaN(balance) && balance >= 0) updateHolding(id, { quantity: balance });
+    setEditBalanceId(null);
+  };
+
+  const openTradeFor = (ticker?: string, assetClass: AssetClass = 'stock', side: 'buy' | 'sell' = 'buy') => {
     setTradeDefaultTicker(ticker);
+    setTradeDefaultAssetClass(assetClass);
+    setTradeDefaultSide(side);
     setShowTradeModal(true);
   };
 
@@ -94,13 +106,22 @@ export function Holdings() {
         <p className="text-sm text-slate-500">
           {holdings.length} positions · {fmtBase(totalValueBase, base)} total
         </p>
-        <button
-          onClick={() => { setTradeDefaultTicker(undefined); setShowTradeModal(true); }}
-          className="flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold transition-all"
-        >
-          <Plus size={15} />
-          Add Trade
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => openTradeFor(undefined, 'cash')}
+            className="flex items-center gap-2 px-3 py-2 rounded-lg border border-slate-700 text-slate-300 hover:text-white hover:border-slate-600 hover:bg-slate-800 text-sm font-semibold transition-all"
+          >
+            <Wallet size={15} />
+            Cash Transaction
+          </button>
+          <button
+            onClick={() => openTradeFor()}
+            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold transition-all"
+          >
+            <Plus size={15} />
+            Add Trade
+          </button>
+        </div>
       </div>
 
       <div className="bg-slate-800/60 rounded-xl border border-slate-700/50 overflow-hidden">
@@ -198,7 +219,34 @@ export function Holdings() {
                     <p className="text-xs text-slate-500">
                       {h.holdDays >= 365 ? `${(h.holdDays / 365).toFixed(1)}y` : `${h.holdDays}d`}
                     </p>
-                    <p className="text-xs text-slate-600">{h.quantity.toLocaleString()} shares</p>
+                    {h.assetClass === 'cash' ? (
+                      editBalanceId === h.id ? (
+                        <input
+                          autoFocus
+                          type="number"
+                          step="any"
+                          min="0"
+                          value={balanceInput}
+                          onChange={(e) => setBalanceInput(e.target.value)}
+                          onBlur={() => handleBalanceSave(h.id)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') handleBalanceSave(h.id);
+                            if (e.key === 'Escape') setEditBalanceId(null);
+                          }}
+                          className="block w-24 mt-0.5 bg-slate-700 border border-blue-500 rounded px-2 py-1 text-xs text-slate-100 focus:outline-none"
+                        />
+                      ) : (
+                        <button
+                          onClick={() => { setEditBalanceId(h.id); setBalanceInput(h.quantity.toString()); }}
+                          className="text-xs text-slate-500 hover:text-blue-400 transition-colors tabular-nums"
+                          title="Click to edit cash balance directly"
+                        >
+                          {h.quantity.toLocaleString(undefined, { maximumFractionDigits: 2 })} balance
+                        </button>
+                      )
+                    ) : (
+                      <p className="text-xs text-slate-600">{h.quantity.toLocaleString()} shares</p>
+                    )}
                   </td>
 
                   <td className="px-4 py-3">
@@ -294,11 +342,11 @@ export function Holdings() {
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                       <button
-                        onClick={() => openBuyFor(h.ticker)}
+                        onClick={() => openTradeFor(h.ticker, h.assetClass)}
                         className="p-1.5 rounded text-slate-500 hover:text-blue-400 hover:bg-slate-700 transition-all"
-                        title="Add trade for this position"
+                        title={h.assetClass === 'cash' ? 'Add cash transaction' : 'Add trade for this position'}
                       >
-                        <ArrowLeftRight size={13} />
+                        {h.assetClass === 'cash' ? <Wallet size={13} /> : <ArrowLeftRight size={13} />}
                       </button>
                       <button
                         onClick={() => setEditHolding(h)}
@@ -326,8 +374,10 @@ export function Holdings() {
 
       {showTradeModal && (
         <AddTradeModal
-          onClose={() => { setShowTradeModal(false); setTradeDefaultTicker(undefined); }}
+          onClose={() => { setShowTradeModal(false); setTradeDefaultTicker(undefined); setTradeDefaultSide('buy'); setTradeDefaultAssetClass('stock'); }}
           defaultTicker={tradeDefaultTicker}
+          defaultSide={tradeDefaultSide}
+          defaultAssetClass={tradeDefaultAssetClass}
         />
       )}
       {editHolding && (

@@ -9,10 +9,8 @@ import {
   REGIME_META, BUSINESS_CYCLE_META, VOLATILITY_META, LIQUIDITY_META,
   CREDIT_CYCLE_META, TRANSITION_RISK_META,
   type RegimeName, type SignalDetail, type LeadingSignal,
-  type BusinessCycleName, type VolatilityLevel, type LiquidityLevel,
-  type CreditCyclePhase, type TransitionRiskLevel,
+  type TransitionRiskLevel,
 } from '../services/regimeDetection';
-import type { AssetClass } from '../types/portfolio';
 
 // ── Quadrant chart ─────────────────────────────────────────────────────────────
 function QuadrantChart({ growthScore, inflationScore }: { growthScore: number; inflationScore: number }) {

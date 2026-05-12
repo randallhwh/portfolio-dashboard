@@ -1,12 +1,16 @@
 import { useState, useMemo, useRef } from 'react';
 import {
   RefreshCw, AlertTriangle, ChevronDown, ChevronUp,
-  Zap, BarChart2, Activity, Plus, X, Loader2,
+  Zap, BarChart2, Activity, Plus, X, Loader2, LineChart,
+  TrendingUp,
 } from 'lucide-react';
 import { usePortfolioStore, toBase } from '../store/portfolioStore';
 import { useRegimeStore } from '../store/regimeStore';
 import { computeTechnicalSignals } from '../services/technicals';
-import type { TechnicalSignals, SignalRating, Holding, WatchlistEntry } from '../types/portfolio';
+import { ChartModal } from '../components/signals/ChartModal';
+import type { TechnicalSignals, SignalRating, Holding, WatchlistEntry, OHLCVBar } from '../types/portfolio';
+
+type ChartEntry = { ticker: string; name: string; currency: string; bars: OHLCVBar[]; sig: TechnicalSignals };
 
 // ─── Shared rating config ─────────────────────────────────────────────────────
 
@@ -44,7 +48,7 @@ function ScoreBar({ score }: { score: number }) {
 function ComponentBar({ label, score }: { label: string; score: number }) {
   return (
     <div className="flex items-center gap-2">
-      <span className="text-xs text-slate-500 w-20 shrink-0">{label}</span>
+      <span className="text-xs text-slate-500 w-24 shrink-0">{label}</span>
       <div className="flex-1 h-1 bg-slate-700 rounded-full overflow-hidden">
         <div className={`h-full rounded-full ${scoreBarCls(score)}`} style={{ width: `${score}%` }} />
       </div>
@@ -53,11 +57,12 @@ function ComponentBar({ label, score }: { label: string; score: number }) {
   );
 }
 
-function IndRow({ label, value, sub }: { label: string; value: string; sub?: string }) {
+function IndRow({ label, value, sub, highlight }: { label: string; value: string; sub?: string; highlight?: 'green' | 'red' | 'amber' }) {
+  const hlCls = highlight === 'green' ? 'text-emerald-400' : highlight === 'red' ? 'text-red-400' : highlight === 'amber' ? 'text-amber-400' : 'text-slate-200';
   return (
     <div className="flex items-center justify-between py-1 border-b border-slate-800/60 last:border-0">
       <span className="text-xs text-slate-500">{label}</span>
-      <span className="text-xs text-slate-200 font-mono">
+      <span className={`text-xs font-mono ${hlCls}`}>
         {value}
         {sub && <span className="text-slate-500 ml-1">{sub}</span>}
       </span>
@@ -65,16 +70,58 @@ function IndRow({ label, value, sub }: { label: string; value: string; sub?: str
   );
 }
 
-// ─── Detail panel (shared between portfolio and watchlist cards) ──────────────
+function spreadTier(pct: number | null): { cls: string; label: string } {
+  if (pct == null) return { cls: 'bg-slate-700/40 text-slate-500', label: '— bps' };
+  const bps = pct * 100;
+  if (pct < 0.05) return { cls: 'bg-emerald-500/15 text-emerald-400', label: `${bps.toFixed(1)} bps · Liquid` };
+  if (pct < 0.20) return { cls: 'bg-amber-500/15 text-amber-400',   label: `${bps.toFixed(1)} bps · Moderate` };
+  return            { cls: 'bg-red-500/15 text-red-400',             label: `${bps.toFixed(1)} bps · Wide` };
+}
+
+function decayCls(pct: number) {
+  if (pct >= 70) return 'text-emerald-400';
+  if (pct >= 40) return 'text-amber-400';
+  return 'text-red-400';
+}
+
+function decayBarCls(pct: number) {
+  if (pct >= 70) return 'bg-emerald-500';
+  if (pct >= 40) return 'bg-amber-500';
+  return 'bg-red-500';
+}
+
+function cmfLabel(cmf: number | null): { text: string; cls: string } {
+  if (cmf == null) return { text: '—', cls: 'text-slate-500' };
+  if (cmf > 0.15)  return { text: `${cmf.toFixed(3)} ↑ Accumulating`, cls: 'text-emerald-400' };
+  if (cmf > 0.05)  return { text: `${cmf.toFixed(3)} ↑ Mild inflow`,  cls: 'text-green-400' };
+  if (cmf < -0.15) return { text: `${cmf.toFixed(3)} ↓ Distributing`, cls: 'text-red-400' };
+  if (cmf < -0.05) return { text: `${cmf.toFixed(3)} ↓ Mild outflow`, cls: 'text-amber-400' };
+  return { text: `${cmf.toFixed(3)} Neutral`, cls: 'text-slate-400' };
+}
+
+function volRegimeBadge(r: TechnicalSignals['intraVolRegime']) {
+  if (r === 'low')  return { label: 'Low-vol trending', cls: 'bg-emerald-500/15 text-emerald-400' };
+  if (r === 'high') return { label: 'High-vol regime',  cls: 'bg-red-500/15 text-red-400' };
+  return                   { label: 'Normal vol',       cls: 'bg-slate-700/60 text-slate-400' };
+}
+
+function shortFlag(pct: number | null): { badge: string | null; cls: string } {
+  if (pct == null || pct < 0.20) return { badge: null, cls: '' };
+  if (pct > 0.30) return { badge: `⚠ ${(pct * 100).toFixed(0)}% short float`, cls: 'bg-red-500/15 text-red-400' };
+  return                 { badge: `${(pct * 100).toFixed(0)}% short float`,    cls: 'bg-amber-500/15 text-amber-400' };
+}
+
+// ─── Detail panel ─────────────────────────────────────────────────────────────
 
 function DetailPanel({
-  ticker,
   currency,
   currentPrice,
   avgCostPerShare,
   sig,
   portfolioValue,
   fxRate,
+  csRank,
+  csTotal,
 }: {
   ticker: string;
   currency: string;
@@ -83,107 +130,304 @@ function DetailPanel({
   sig: TechnicalSignals;
   portfolioValue: number;
   fxRate: number;
+  csRank?: number;
+  csTotal?: number;
 }) {
   const hardStop = avgCostPerShare != null ? avgCostPerShare * 0.92 : null;
   const riskPerTrade2pct = portfolioValue * 0.02;
   const riskPerTrade1pct = portfolioValue * 0.01;
-  const stopDistBase = sig.suggestedStop != null ? (currentPrice - sig.suggestedStop) * fxRate : null;
-  const shares2pct = stopDistBase != null && stopDistBase > 0
-    ? Math.floor(riskPerTrade2pct / stopDistBase) : null;
-  const posValue2pct = shares2pct != null ? shares2pct * currentPrice * fxRate : null;
 
-  const macdDir   = sig.macdHistogram != null ? (sig.macdHistogram > 0 ? '▲ Positive' : '▼ Negative') : '—';
-  const macdColor = sig.macdHistogram != null ? (sig.macdHistogram > 0 ? 'text-emerald-400' : 'text-red-400') : 'text-slate-500';
+  // Vol-scaled position size: target 0.3% daily vol contribution per position
+  const dailyVol = sig.rv21d != null ? (sig.rv21d / 100) / Math.sqrt(252) : null;
+  const targetDailyVol = 0.003;
+  const volScaleMultiplier = dailyVol != null && dailyVol > 0 ? targetDailyVol / dailyVol : null;
+
+  const stopForSizing = sig.chandelierStop ?? sig.suggestedStop;
+  const stopDistBase  = stopForSizing != null ? (currentPrice - stopForSizing) * fxRate : null;
+  const shares2pct    = stopDistBase != null && stopDistBase > 0 ? Math.floor(riskPerTrade2pct / stopDistBase) : null;
+  const posValue2pct  = shares2pct != null ? shares2pct * currentPrice * fxRate : null;
+
+  const macdDir    = sig.macdHistogram != null ? (sig.macdHistogram > 0 ? '▲ Positive' : '▼ Negative') : '—';
   const priceVsSma20 = sig.sma20 != null ? (currentPrice > sig.sma20 ? '▲ Above' : '▼ Below') : '—';
   const priceVsSma50 = sig.sma50 != null ? (currentPrice > sig.sma50 ? '▲ Above' : '▼ Below') : '—';
   const fmt = (v: number | null, dp = 2) => v != null ? v.toFixed(dp) : '—';
+  const vrBadge = volRegimeBadge(sig.intraVolRegime);
+  const cmfInfo = cmfLabel(sig.cmf20);
 
   return (
     <div className="mt-4 bg-slate-900/60 border border-slate-700 rounded-xl p-5 space-y-5">
-      {/* Score breakdown */}
+
+      {/* ── Earnings warning ─────────────────────────────────────────────── */}
+      {sig.nearEarnings && (
+        <div className="flex items-start gap-2 bg-amber-500/10 border border-amber-500/30 rounded-lg p-3">
+          <AlertTriangle size={14} className="text-amber-400 mt-0.5 shrink-0" />
+          <div className="text-xs text-amber-300">
+            <span className="font-semibold">Earnings event {sig.daysToEarnings != null && sig.daysToEarnings >= 0 ? `in ${sig.daysToEarnings}d` : 'recently'}</span>
+            {' — '} binary risk. Signals may be unreliable across the event window.
+          </div>
+        </div>
+      )}
+
+      {/* ── Score breakdown ───────────────────────────────────────────────── */}
       <div>
-        <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Score Breakdown</p>
+        <div className="flex items-center justify-between mb-2">
+          <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Score Breakdown</p>
+          <div className="flex items-center gap-2">
+            {csRank != null && csTotal != null && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-400 font-mono">
+                #{csRank} of {csTotal} · 6M RS
+              </span>
+            )}
+            <span className={`text-[10px] px-1.5 py-0.5 rounded ${vrBadge.cls}`}>{vrBadge.label}</span>
+          </div>
+        </div>
         <div className="space-y-1.5">
-          <ComponentBar label="Trend (30%)"      score={sig.trendScore} />
-          <ComponentBar label="Momentum (30%)"   score={sig.momentumScore} />
+          <ComponentBar label={`Trend${!sig.tsmomBullish ? ' ⊘gated' : ''} (30%)`}  score={sig.trendScore} />
+          <ComponentBar label={`Momentum${!sig.tsmomBullish ? ' ⊘gated' : ''} (30%)`} score={sig.momentumScore} />
           <ComponentBar label="Volatility (15%)" score={sig.volatilityScore} />
           <ComponentBar label="Volume (15%)"     score={sig.volumeScore} />
         </div>
+        {!sig.tsmomBullish && (
+          <p className="mt-1.5 text-[10px] text-amber-400/80">
+            ⊘ Trend & momentum scores capped at neutral — 6M return is negative (TSMOM gate).
+          </p>
+        )}
       </div>
 
       <div className="grid grid-cols-2 gap-5">
-        {/* Trend & momentum */}
+        {/* ── Trend & Momentum ──────────────────────────────────────────── */}
         <div>
           <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Trend & Momentum</p>
+          <IndRow label="6M return (TSMOM)"
+            value={`${(((sig.featureVector[6] ?? 0)) * 100).toFixed(1)}%`}
+            highlight={sig.tsmomBullish ? 'green' : 'red'}
+          />
           <IndRow label="RSI(14)" value={sig.rsi != null ? String(sig.rsi) : '—'}
-            sub={sig.oversold ? '← oversold' : sig.overbought ? '← overbought' : undefined} />
-          <IndRow label="MACD hist" value={macdDir} />
-          <IndRow label="MACD line"   value={fmt(sig.macd, 4)} />
-          <IndRow label="Signal line" value={fmt(sig.macdSignal, 4)} />
+            sub={sig.oversold ? '← oversold' : sig.overbought ? '← overbought' : undefined}
+            highlight={sig.oversold ? 'green' : sig.overbought ? 'red' : undefined}
+          />
+          <IndRow label="MACD hist" value={macdDir}
+            highlight={sig.macdHistogram != null ? (sig.macdHistogram > 0 ? 'green' : 'red') : undefined}
+          />
           <IndRow label="SMA20" value={fmt(sig.sma20)} sub={`price ${priceVsSma20}`} />
           <IndRow label="SMA50" value={sig.sma50 != null ? fmt(sig.sma50) : 'warming up'}
             sub={sig.sma50 != null ? `price ${priceVsSma50}` : undefined} />
+          <IndRow label="52wk high ratio"
+            value={sig.pth52wk != null ? `${(sig.pth52wk * 100).toFixed(1)}%` : '—'}
+            highlight={sig.isNew52wkHigh ? 'green' : sig.pth52wk != null && sig.pth52wk < 0.70 ? 'red' : undefined}
+            sub={sig.isNew52wkHigh ? '← new high' : undefined}
+          />
+          {sig.betaVsSpy != null && (
+            <IndRow label="Beta vs SPY"
+              value={sig.betaVsSpy.toFixed(2)}
+              sub={sig.betaVsSpy < 0.7 ? '← low beta' : sig.betaVsSpy > 1.5 ? '← high beta' : undefined}
+              highlight={sig.betaVsSpy > 1.5 ? 'amber' : undefined}
+            />
+          )}
           {sig.goldenCross && <p className="mt-1 text-xs text-emerald-400 flex items-center gap-1"><Zap size={10} /> SMA20 crossed above SMA50</p>}
           {sig.deathCross  && <p className="mt-1 text-xs text-red-400 flex items-center gap-1"><AlertTriangle size={10} /> SMA20 crossed below SMA50</p>}
         </div>
-        {/* Volatility & volume */}
+
+        {/* ── Volatility & Volume ───────────────────────────────────────── */}
         <div>
           <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Volatility & Volume</p>
+          <IndRow label="BB %B" value={sig.bbPctB != null ? sig.bbPctB.toFixed(3) : '—'}
+            sub={sig.bbPctB != null ? (sig.bbPctB > 0.8 ? '← near upper' : sig.bbPctB < 0.2 ? '← near lower' : '') : undefined}
+            highlight={sig.bbPctB != null ? (sig.bbPctB > 0.8 ? 'red' : sig.bbPctB < 0.2 ? 'green' : undefined) : undefined}
+          />
           <IndRow label="BB Upper"  value={fmt(sig.bbUpper)} />
-          <IndRow label="BB Middle" value={fmt(sig.bbMiddle)} />
           <IndRow label="BB Lower"  value={fmt(sig.bbLower)} />
           <IndRow label="BB Width"  value={sig.bbBandwidth != null ? `${fmt(sig.bbBandwidth, 1)}%` : '—'}
             sub={sig.bbSqueeze ? '← squeeze' : undefined} />
           <IndRow label="ATR(14)"   value={fmt(sig.atr, 4)} />
+          <IndRow label="Realized vol" value={sig.rv21d != null ? `${sig.rv21d.toFixed(1)}%` : '—'}
+            sub="21d ann."
+            highlight={sig.intraVolRegime === 'high' ? 'red' : sig.intraVolRegime === 'low' ? 'green' : undefined}
+          />
+          <div className="flex items-center justify-between py-1 border-b border-slate-800/60">
+            <span className="text-xs text-slate-500">CMF(20)</span>
+            <span className={`text-xs font-mono ${cmfInfo.cls}`}>{cmfInfo.text}</span>
+          </div>
           <IndRow label="Vol ratio" value={sig.volumeRatio != null ? `${sig.volumeRatio}×` : '—'}
             sub={sig.volumeRatio != null ? (sig.volumeRatio > 1.5 ? 'high' : sig.volumeRatio < 0.7 ? 'low' : 'avg') : undefined} />
-          <IndRow label="Bars"      value={`${sig.barsAvailable} days`} />
         </div>
       </div>
 
-      {/* Entry / exit levels */}
+      {/* ── Entry guidance ────────────────────────────────────────────────── */}
+      {(() => {
+        const qCfg = {
+          ideal:    { border: 'border-emerald-500/40', bg: 'bg-emerald-500/8',  badge: 'bg-emerald-500/15 text-emerald-400', label: 'Ideal Entry' },
+          ok:       { border: 'border-green-500/40',   bg: 'bg-green-500/8',    badge: 'bg-green-500/15 text-green-400',     label: 'OK Entry' },
+          stretched:{ border: 'border-amber-500/40',   bg: 'bg-amber-500/8',    badge: 'bg-amber-500/15 text-amber-400',     label: 'Stretched — Wait' },
+          avoid:    { border: 'border-red-500/40',     bg: 'bg-red-500/8',      badge: 'bg-red-500/15 text-red-400',         label: 'Avoid Entry' },
+        }[sig.entryQuality];
+        return (
+          <div>
+            <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Entry Guidance</p>
+            <div className={`border ${qCfg.border} ${qCfg.bg} rounded-xl p-4 space-y-3`}>
+              <div className="flex items-center justify-between">
+                <span className={`text-xs font-bold px-2 py-0.5 rounded ${qCfg.badge}`}>{qCfg.label}</span>
+                <div className="flex items-center gap-2 text-xs">
+                  {sig.isNew52wkHigh && (
+                    <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400">↑ 52wk High</span>
+                  )}
+                  <span className="text-slate-500">{currency}</span>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <p className="text-[10px] text-slate-500 mb-0.5">
+                    {sig.oversold ? 'Enter at / below' : sig.isNew52wkHigh ? 'Breakout entry' : 'Limit order target'}
+                  </p>
+                  <p className="text-lg font-bold text-slate-100 font-mono">
+                    {sig.entryLimit != null ? sig.entryLimit.toFixed(2) : '—'}
+                  </p>
+                  <p className="text-[10px] text-slate-500 mt-0.5">
+                    {sig.oversold ? 'RSI oversold — current price'
+                      : sig.isNew52wkHigh ? 'Current price at new high'
+                      : sig.sma20 != null
+                        ? (sig.entryLimit != null && sig.entryLimit < sig.sma20
+                          ? 'Below SMA20 — dip entry'
+                          : 'SMA20 pullback target')
+                        : 'Current price'}
+                  </p>
+                </div>
+                {sig.entryBreakout != null && (
+                  <div>
+                    <p className="text-[10px] text-slate-500 mb-0.5">Breakout entry above</p>
+                    <p className="text-lg font-bold text-blue-300 font-mono">{sig.entryBreakout.toFixed(2)}</p>
+                    <p className="text-[10px] text-slate-500 mt-0.5">
+                      {sig.bbSqueeze ? 'BB upper — squeeze breakout' : 'Bollinger upper band'}
+                    </p>
+                  </div>
+                )}
+              </div>
+              <p className="text-xs text-slate-400 leading-relaxed border-t border-slate-700/50 pt-2">
+                {sig.entryNote}
+              </p>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ── Exit levels ───────────────────────────────────────────────────── */}
       <div>
         <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">
-          Entry / Exit Levels ({currency})
+          Exit Levels ({currency})
         </p>
         <div className="grid grid-cols-2 gap-3">
-          <div className="bg-red-500/8 border border-red-500/20 rounded-lg p-3 space-y-1">
-            <p className="text-xs text-slate-400">Stop Loss (ATR-based)</p>
-            <p className="text-sm font-semibold text-red-400">
-              {sig.suggestedStop != null ? sig.suggestedStop.toFixed(2) : '—'}
-            </p>
-            <p className="text-xs text-slate-500">Entry − 2×ATR</p>
-            {hardStop != null && (
-              <p className="text-xs text-slate-500 mt-1">O'Neil rule: {hardStop.toFixed(2)} (−8% cost)</p>
+          {/* Stop loss */}
+          <div className="space-y-1.5">
+            {sig.chandelierStop != null && (
+              <div className="bg-red-500/8 border border-red-500/20 rounded-lg p-3 space-y-1">
+                <p className="text-xs text-slate-400">Chandelier Stop <span className="text-slate-600">(trailing)</span></p>
+                <p className="text-sm font-semibold text-red-400">{sig.chandelierStop.toFixed(2)}</p>
+                <p className="text-xs text-slate-500">Peak close − 3×ATR(22)</p>
+              </div>
             )}
+            <div className="bg-red-500/8 border border-red-500/20 rounded-lg p-3 space-y-1">
+              <p className="text-xs text-slate-400">ATR Stop <span className="text-slate-600">(entry-based)</span></p>
+              <p className="text-sm font-semibold text-red-400">
+                {sig.suggestedStop != null ? sig.suggestedStop.toFixed(2) : '—'}
+              </p>
+              <p className="text-xs text-slate-500">Price − 2×ATR</p>
+              {hardStop != null && (
+                <p className="text-xs text-slate-500">O'Neil rule: {hardStop.toFixed(2)} (−8%)</p>
+              )}
+            </div>
           </div>
+          {/* Targets */}
           <div className="space-y-1.5">
             <div className="bg-emerald-500/8 border border-emerald-500/20 rounded-lg p-2.5">
-              <p className="text-xs text-slate-400">Target 1 (sell ⅓)</p>
+              <p className="text-xs text-slate-400">Target 1 — sell ⅓</p>
               <p className="text-sm font-semibold text-emerald-400">
                 {sig.tier1Target != null ? sig.tier1Target.toFixed(2) : '—'}
-                <span className="text-xs text-slate-500 ml-1">+3%</span>
+                {sig.atr != null && <span className="text-xs text-slate-500 ml-1">+1.5×ATR</span>}
               </p>
             </div>
             <div className="bg-emerald-500/8 border border-emerald-500/20 rounded-lg p-2.5">
-              <p className="text-xs text-slate-400">Target 2 (sell ⅓)</p>
+              <p className="text-xs text-slate-400">Target 2 — sell ⅓</p>
               <p className="text-sm font-semibold text-emerald-400">
                 {sig.tier2Target != null ? sig.tier2Target.toFixed(2) : '—'}
-                <span className="text-xs text-slate-500 ml-1">+6%</span>
+                {sig.atr != null && <span className="text-xs text-slate-500 ml-1">+3×ATR</span>}
               </p>
             </div>
             <div className="bg-slate-700/40 border border-slate-600/30 rounded-lg p-2.5">
-              <p className="text-xs text-slate-400">Trailing (last ⅓)</p>
-              <p className="text-xs text-slate-300">−10% trailing from peak</p>
+              <p className="text-xs text-slate-400">Trailing — last ⅓</p>
+              <p className="text-xs text-slate-300">
+                {sig.chandelierStop != null ? 'Use Chandelier Stop above' : '−10% trail from peak'}
+              </p>
             </div>
           </div>
         </div>
       </div>
 
-      {/* Position sizing */}
+      {/* ── Execution quality ─────────────────────────────────────────────── */}
+      <div>
+        <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Execution Quality</p>
+        <div className="grid grid-cols-2 gap-3">
+          <div className="bg-slate-800/50 rounded-lg p-3 space-y-1">
+            <p className="text-xs text-slate-500 mb-1">CS Spread Estimate</p>
+            {sig.csSpreadPct != null ? (
+              <>
+                <p className={`text-sm font-semibold ${spreadTier(sig.csSpreadPct).cls.split(' ')[1]}`}>
+                  {(sig.csSpreadPct * 100).toFixed(2)} bps
+                </p>
+                <p className="text-xs text-slate-500">
+                  {sig.csSpreadPct < 0.05 ? 'Liquid — tight spread' : sig.csSpreadPct < 0.20 ? 'Moderate — normal cost' : 'Wide — expect slippage'}
+                </p>
+              </>
+            ) : (
+              <p className="text-xs text-slate-600">Insufficient OHLCV data</p>
+            )}
+            <p className="text-[10px] text-slate-600 mt-1">Corwin-Schultz (2012) · 20-day avg</p>
+          </div>
+          <div className="bg-slate-800/50 rounded-lg p-3 space-y-1">
+            <p className="text-xs text-slate-500 mb-1">Signal Edge Decay</p>
+            <p className={`text-sm font-semibold ${decayCls(sig.decayPct)}`}>
+              {sig.decayPct}% edge remaining
+            </p>
+            <p className="text-xs text-slate-500">
+              {sig.signalType === 'momentum' ? 'Momentum' : sig.signalType === 'mean_reversion' ? 'Mean-reversion' : 'No active'} signal
+              {sig.signalAgeBars > 0 ? ` · ${sig.signalAgeBars}d active` : ''}
+            </p>
+            <div className="h-1 bg-slate-700 rounded-full mt-1.5 overflow-hidden">
+              <div className={`h-full rounded-full ${decayBarCls(sig.decayPct)}`} style={{ width: `${sig.decayPct}%` }} />
+            </div>
+            <p className="text-[10px] text-slate-600">
+              ½-life: {sig.signalType === 'momentum' ? '200d' : sig.signalType === 'mean_reversion' ? '5d' : '30d'} · Di Mascio et al. (2021)
+            </p>
+          </div>
+        </div>
+        {/* Earnings proximity detail */}
+        {sig.daysToEarnings != null && (
+          <div className="mt-2 bg-slate-800/40 rounded-lg px-3 py-2 flex items-center justify-between text-xs">
+            <span className="text-slate-500">Next earnings</span>
+            <span className={`font-mono ${Math.abs(sig.daysToEarnings) <= 7 ? 'text-amber-400' : 'text-slate-300'}`}>
+              {sig.daysToEarnings >= 0 ? `in ${sig.daysToEarnings}d` : `${Math.abs(sig.daysToEarnings)}d ago`}
+            </span>
+          </div>
+        )}
+      </div>
+
+      {/* ── Position sizing ───────────────────────────────────────────────── */}
       <div>
         <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Position Sizing</p>
         <div className="bg-slate-800/50 rounded-lg p-3 space-y-1.5 text-xs text-slate-400">
+          {volScaleMultiplier != null && (
+            <div className="flex justify-between pb-1.5 mb-0.5 border-b border-slate-700">
+              <span>
+                Vol-target multiplier
+                <span className="text-slate-600 ml-1">(0.3% daily vol target)</span>
+              </span>
+              <span className={`font-mono font-semibold ${volScaleMultiplier >= 1 ? 'text-emerald-400' : 'text-amber-400'}`}>
+                {volScaleMultiplier.toFixed(2)}×
+                <span className="text-slate-500 ml-1 font-normal">
+                  {volScaleMultiplier >= 1 ? 'can size up' : 'size down'}
+                </span>
+              </span>
+            </div>
+          )}
           <div className="flex justify-between">
             <span>Risk 1% of portfolio</span>
             <span className="text-slate-200 font-mono">{riskPerTrade1pct.toFixed(0)} (base ccy)</span>
@@ -192,10 +436,10 @@ function DetailPanel({
             <span>Risk 2% of portfolio</span>
             <span className="text-slate-200 font-mono">{riskPerTrade2pct.toFixed(0)} (base ccy)</span>
           </div>
-          {sig.suggestedStop != null && (
+          {stopForSizing != null && (
             <div className="flex justify-between">
-              <span>Stop distance (2×ATR)</span>
-              <span className="text-slate-200 font-mono">{(currentPrice - sig.suggestedStop).toFixed(3)} {currency}</span>
+              <span>Stop distance ({sig.chandelierStop != null ? 'Chandelier' : '2×ATR'})</span>
+              <span className="text-slate-200 font-mono">{(currentPrice - stopForSizing).toFixed(3)} {currency}</span>
             </div>
           )}
           {shares2pct != null && (
@@ -212,6 +456,7 @@ function DetailPanel({
           )}
           <p className="pt-1 text-slate-500 border-t border-slate-700">
             Conservative: 1% risk · Moderate: 2% risk · Cap any single position at 5% of portfolio.
+            {volScaleMultiplier != null && ` Vol-target multiplier adjusts for realized volatility.`}
           </p>
         </div>
       </div>
@@ -219,40 +464,78 @@ function DetailPanel({
   );
 }
 
+// ─── Card signal flags row ────────────────────────────────────────────────────
+
+function SignalFlags({ sig, shortPct }: { sig: TechnicalSignals; shortPct?: number | null }) {
+  const sf = shortFlag(shortPct ?? null);
+  const hasFlags = sig.oversold || sig.overbought || sig.bbSqueeze || sig.goldenCross || sig.deathCross
+    || sig.isNew52wkHigh || sig.nearEarnings || !sig.tsmomBullish || sf.badge != null;
+  if (!hasFlags) return null;
+  return (
+    <div className="mt-2 flex flex-wrap gap-1">
+      {sig.nearEarnings    && <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400">⏰ Earnings</span>}
+      {sig.isNew52wkHigh   && <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400">↑ 52wk High</span>}
+      {sig.oversold        && <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400">Oversold</span>}
+      {sig.overbought      && <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-500/15 text-red-400">Overbought</span>}
+      {sig.bbSqueeze       && <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-400">BB Squeeze</span>}
+      {sig.goldenCross     && <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400">↑ MA Cross</span>}
+      {sig.deathCross      && <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-500/15 text-red-400">↓ MA Cross</span>}
+      {!sig.tsmomBullish   && <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400">⊘ 6M Downtrend</span>}
+      {sf.badge != null    && <span className={`text-[10px] px-1.5 py-0.5 rounded ${sf.cls}`}>{sf.badge}</span>}
+    </div>
+  );
+}
+
 // ─── Portfolio signal card ────────────────────────────────────────────────────
 
 function PortfolioSignalCard({
-  holding, sig, isSelected, onSelect, portfolioValue, fxRate,
+  holding, sig, isSelected, onSelect, onOpenChart, portfolioValue, fxRate,
+  csRank, csTotal, shortPct,
 }: {
   holding: Holding;
   sig: TechnicalSignals;
   isSelected: boolean;
   onSelect: () => void;
+  onOpenChart: () => void;
   portfolioValue: number;
   fxRate: number;
+  csRank?: number;
+  csTotal?: number;
+  shortPct?: number | null;
 }) {
-  const cfg = RATING_CFG[sig.rating];
+  const cfg    = RATING_CFG[sig.rating];
   const gainPct = ((holding.currentPrice - holding.avgCostPerShare) / holding.avgCostPerShare) * 100;
   const macdBull = sig.macdHistogram != null && sig.macdHistogram > 0;
-  const trendOk  = sig.sma20 != null && holding.currentPrice > sig.sma20;
+  const cmfBull  = sig.cmf20 != null && sig.cmf20 > 0.05;
+  const cmfBear  = sig.cmf20 != null && sig.cmf20 < -0.05;
 
   return (
     <div>
       <button
         onClick={onSelect}
         className={`w-full text-left rounded-xl border transition-all p-4 ${
-          isSelected
-            ? 'bg-slate-800 border-blue-500/50'
-            : 'bg-slate-900/60 border-slate-700 hover:border-slate-600 hover:bg-slate-800/50'
+          isSelected ? 'bg-slate-800 border-blue-500/50' : 'bg-slate-900/60 border-slate-700 hover:border-slate-600 hover:bg-slate-800/50'
         }`}
       >
         <div className="flex items-start justify-between mb-3">
           <div>
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-bold text-slate-100">{holding.ticker}</span>
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                onClick={e => { e.stopPropagation(); onOpenChart(); }}
+                className="flex items-center gap-1 text-sm font-bold text-slate-100 hover:text-blue-300 transition-colors group"
+                title="Open chart"
+              >
+                {holding.ticker}
+                <LineChart size={12} className="text-slate-600 group-hover:text-blue-400 transition-colors" />
+              </button>
               <span className={`text-xs px-1.5 py-0.5 rounded font-semibold ${cfg.bgCls} ${cfg.textCls}`}>
                 {cfg.label}
               </span>
+              {csRank != null && csTotal != null && (
+                <span className="text-[10px] px-1 py-0.5 rounded bg-blue-500/10 text-blue-500 font-mono">
+                  #{csRank}/{csTotal}
+                </span>
+              )}
             </div>
             <p className="text-xs text-slate-500 mt-0.5 truncate max-w-[160px]">{holding.name}</p>
           </div>
@@ -266,7 +549,7 @@ function PortfolioSignalCard({
           </div>
         </div>
         <ScoreBar score={sig.score} />
-        <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
+        <div className="mt-3 grid grid-cols-4 gap-1 text-xs">
           <div className="text-center">
             <p className="text-slate-500">RSI</p>
             <p className={`font-mono font-semibold ${sig.oversold ? 'text-emerald-400' : sig.overbought ? 'text-red-400' : 'text-slate-300'}`}>
@@ -280,24 +563,30 @@ function PortfolioSignalCard({
             </p>
           </div>
           <div className="text-center">
-            <p className="text-slate-500">Trend</p>
-            <p className={`font-semibold ${trendOk ? 'text-emerald-400' : 'text-red-400'}`}>
-              {sig.sma20 != null ? (trendOk ? '✓' : '✗') : '—'}
+            <p className="text-slate-500">CMF</p>
+            <p className={`font-semibold ${cmfBull ? 'text-emerald-400' : cmfBear ? 'text-red-400' : 'text-slate-400'}`}>
+              {sig.cmf20 != null ? (cmfBull ? '▲' : cmfBear ? '▼' : '—') : '—'}
+            </p>
+          </div>
+          <div className="text-center">
+            <p className="text-slate-500">PTH</p>
+            <p className={`font-mono font-semibold text-[11px] ${sig.isNew52wkHigh ? 'text-emerald-400' : sig.pth52wk != null && sig.pth52wk > 0.9 ? 'text-green-400' : 'text-slate-400'}`}>
+              {sig.pth52wk != null ? `${(sig.pth52wk * 100).toFixed(0)}%` : '—'}
             </p>
           </div>
         </div>
-        {(sig.oversold || sig.overbought || sig.bbSqueeze || sig.goldenCross || sig.deathCross) && (
-          <div className="mt-2 flex flex-wrap gap-1">
-            {sig.oversold    && <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400">Oversold</span>}
-            {sig.overbought  && <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-500/15 text-red-400">Overbought</span>}
-            {sig.bbSqueeze   && <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-400">BB Squeeze</span>}
-            {sig.goldenCross && <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400">↑ MA Cross</span>}
-            {sig.deathCross  && <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-500/15 text-red-400">↓ MA Cross</span>}
+        <SignalFlags sig={sig} shortPct={shortPct} />
+        <div className="mt-2 flex items-center justify-between text-[10px]">
+          <span className={`px-1.5 py-0.5 rounded ${spreadTier(sig.csSpreadPct).cls}`}>
+            {spreadTier(sig.csSpreadPct).label}
+          </span>
+          <span className={`font-mono ${decayCls(sig.decayPct)}`}>
+            Edge {sig.decayPct}%{sig.signalAgeBars > 0 ? ` · ${sig.signalAgeBars}d` : ''}
+          </span>
+          <div className="flex items-center gap-1 text-slate-600">
+            {isSelected ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+            <span>details</span>
           </div>
-        )}
-        <div className="mt-2 flex items-center justify-end gap-1 text-slate-600">
-          {isSelected ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-          <span className="text-[10px]">details</span>
         </div>
       </button>
       {isSelected && (
@@ -309,6 +598,8 @@ function PortfolioSignalCard({
           sig={sig}
           portfolioValue={portfolioValue}
           fxRate={fxRate}
+          csRank={csRank}
+          csTotal={csTotal}
         />
       )}
     </div>
@@ -318,39 +609,48 @@ function PortfolioSignalCard({
 // ─── Watchlist signal card ────────────────────────────────────────────────────
 
 function WatchlistSignalCard({
-  entry, sig, isSelected, onSelect, onRemove, portfolioValue,
+  entry, sig, isSelected, onSelect, onRemove, onOpenChart, portfolioValue, csRank, csTotal, shortPct,
 }: {
   entry: WatchlistEntry;
   sig: TechnicalSignals | undefined;
   isSelected: boolean;
   onSelect: () => void;
   onRemove: () => void;
+  onOpenChart: () => void;
   portfolioValue: number;
+  csRank?: number;
+  csTotal?: number;
+  shortPct?: number | null;
 }) {
   const cfg = sig ? RATING_CFG[sig.rating] : null;
   const macdBull = sig?.macdHistogram != null && sig.macdHistogram > 0;
-  const trendOk  = sig?.sma20 != null && entry.currentPrice > sig.sma20;
+  const cmfBull  = sig?.cmf20 != null && sig.cmf20 > 0.05;
+  const cmfBear  = sig?.cmf20 != null && sig.cmf20 < -0.05;
 
   return (
     <div>
-      <div className={`rounded-xl border transition-all p-4 ${
-        isSelected
-          ? 'bg-slate-800 border-blue-500/50'
-          : 'bg-slate-900/60 border-slate-700'
-      }`}>
-        {/* Header */}
+      <div className={`rounded-xl border transition-all p-4 ${isSelected ? 'bg-slate-800 border-blue-500/50' : 'bg-slate-900/60 border-slate-700'}`}>
         <div className="flex items-start justify-between mb-3">
           <button onClick={onSelect} className="flex-1 text-left">
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-bold text-slate-100">{entry.ticker}</span>
+            <div className="flex items-center gap-2 flex-wrap">
+              <span
+                onClick={sig ? e => { e.stopPropagation(); onOpenChart(); } : undefined}
+                className={`flex items-center gap-1 text-sm font-bold text-slate-100 ${sig ? 'hover:text-blue-300 cursor-pointer group' : ''} transition-colors`}
+              >
+                {entry.ticker}
+                {sig && <LineChart size={12} className="text-slate-600 group-hover:text-blue-400 transition-colors" />}
+              </span>
               {cfg && (
                 <span className={`text-xs px-1.5 py-0.5 rounded font-semibold ${cfg.bgCls} ${cfg.textCls}`}>
                   {cfg.label}
                 </span>
               )}
-              <span className="text-[10px] px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-400 font-medium">
-                Watchlist
-              </span>
+              {csRank != null && csTotal != null && (
+                <span className="text-[10px] px-1 py-0.5 rounded bg-blue-500/10 text-blue-500 font-mono">
+                  #{csRank}/{csTotal}
+                </span>
+              )}
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-400 font-medium">Watchlist</span>
             </div>
             <p className="text-xs text-slate-500 mt-0.5 truncate max-w-[160px]">{entry.name}</p>
           </button>
@@ -364,7 +664,6 @@ function WatchlistSignalCard({
             <button
               onClick={(e) => { e.stopPropagation(); onRemove(); }}
               className="p-1 rounded-lg text-slate-600 hover:text-red-400 hover:bg-red-500/10 transition-all"
-              title="Remove from watchlist"
             >
               <X size={13} />
             </button>
@@ -374,7 +673,7 @@ function WatchlistSignalCard({
         {sig ? (
           <button onClick={onSelect} className="w-full text-left">
             <ScoreBar score={sig.score} />
-            <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
+            <div className="mt-3 grid grid-cols-4 gap-1 text-xs">
               <div className="text-center">
                 <p className="text-slate-500">RSI</p>
                 <p className={`font-mono font-semibold ${sig.oversold ? 'text-emerald-400' : sig.overbought ? 'text-red-400' : 'text-slate-300'}`}>
@@ -388,30 +687,34 @@ function WatchlistSignalCard({
                 </p>
               </div>
               <div className="text-center">
-                <p className="text-slate-500">Trend</p>
-                <p className={`font-semibold ${trendOk ? 'text-emerald-400' : 'text-red-400'}`}>
-                  {sig.sma20 != null ? (trendOk ? '✓' : '✗') : '—'}
+                <p className="text-slate-500">CMF</p>
+                <p className={`font-semibold ${cmfBull ? 'text-emerald-400' : cmfBear ? 'text-red-400' : 'text-slate-400'}`}>
+                  {sig.cmf20 != null ? (cmfBull ? '▲' : cmfBear ? '▼' : '—') : '—'}
+                </p>
+              </div>
+              <div className="text-center">
+                <p className="text-slate-500">PTH</p>
+                <p className={`font-mono font-semibold text-[11px] ${sig.isNew52wkHigh ? 'text-emerald-400' : sig.pth52wk != null && sig.pth52wk > 0.9 ? 'text-green-400' : 'text-slate-400'}`}>
+                  {sig.pth52wk != null ? `${(sig.pth52wk * 100).toFixed(0)}%` : '—'}
                 </p>
               </div>
             </div>
-            {(sig.oversold || sig.overbought || sig.bbSqueeze || sig.goldenCross || sig.deathCross) && (
-              <div className="mt-2 flex flex-wrap gap-1">
-                {sig.oversold    && <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400">Oversold</span>}
-                {sig.overbought  && <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-500/15 text-red-400">Overbought</span>}
-                {sig.bbSqueeze   && <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-400">BB Squeeze</span>}
-                {sig.goldenCross && <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400">↑ MA Cross</span>}
-                {sig.deathCross  && <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-500/15 text-red-400">↓ MA Cross</span>}
+            <SignalFlags sig={sig} shortPct={shortPct} />
+            <div className="mt-2 flex items-center justify-between text-[10px]">
+              <span className={`px-1.5 py-0.5 rounded ${spreadTier(sig.csSpreadPct).cls}`}>
+                {spreadTier(sig.csSpreadPct).label}
+              </span>
+              <span className={`font-mono ${decayCls(sig.decayPct)}`}>
+                Edge {sig.decayPct}%{sig.signalAgeBars > 0 ? ` · ${sig.signalAgeBars}d` : ''}
+              </span>
+              <div className="flex items-center gap-1 text-slate-600">
+                {isSelected ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                <span>details</span>
               </div>
-            )}
-            <div className="mt-2 flex items-center justify-end gap-1 text-slate-600">
-              {isSelected ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-              <span className="text-[10px]">details</span>
             </div>
           </button>
         ) : (
-          <p className="text-xs text-slate-600 italic mt-1">
-            No data — click Refresh prices to load signals
-          </p>
+          <p className="text-xs text-slate-600 italic mt-1">No data — click Refresh prices to load signals</p>
         )}
       </div>
 
@@ -423,6 +726,8 @@ function WatchlistSignalCard({
           sig={sig}
           portfolioValue={portfolioValue}
           fxRate={1}
+          csRank={csRank}
+          csTotal={csTotal}
         />
       )}
     </div>
@@ -432,7 +737,7 @@ function WatchlistSignalCard({
 // ─── Add-to-watchlist form ────────────────────────────────────────────────────
 
 function AddWatchlistForm({ onAdd }: { onAdd: (ticker: string) => Promise<{ success: boolean; error?: string }> }) {
-  const [input, setInput] = useState('');
+  const [input, setInput]   = useState('');
   const [status, setStatus] = useState<'idle' | 'loading' | 'error'>('idle');
   const [errorMsg, setErrorMsg] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
@@ -444,14 +749,8 @@ function AddWatchlistForm({ onAdd }: { onAdd: (ticker: string) => Promise<{ succ
     setStatus('loading');
     setErrorMsg('');
     const result = await onAdd(t);
-    if (result.success) {
-      setInput('');
-      setStatus('idle');
-      inputRef.current?.focus();
-    } else {
-      setStatus('error');
-      setErrorMsg(result.error ?? 'Unknown error');
-    }
+    if (result.success) { setInput(''); setStatus('idle'); inputRef.current?.focus(); }
+    else { setStatus('error'); setErrorMsg(result.error ?? 'Unknown error'); }
   };
 
   return (
@@ -471,16 +770,12 @@ function AddWatchlistForm({ onAdd }: { onAdd: (ticker: string) => Promise<{ succ
           disabled={!input.trim() || status === 'loading'}
           className="flex items-center gap-1.5 px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-all"
         >
-          {status === 'loading'
-            ? <Loader2 size={14} className="animate-spin" />
-            : <Plus size={14} />}
+          {status === 'loading' ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />}
           Add
         </button>
       </div>
       {status === 'error' && (
-        <p className="text-xs text-red-400 flex items-center gap-1">
-          <AlertTriangle size={11} /> {errorMsg}
-        </p>
+        <p className="text-xs text-red-400 flex items-center gap-1"><AlertTriangle size={11} /> {errorMsg}</p>
       )}
     </form>
   );
@@ -503,14 +798,16 @@ export function Signals() {
     holdings, ohlcvData, settings, exchangeRates,
     fetchLivePrices, priceStatus, getTotalValue,
     watchlist, addToWatchlist, removeFromWatchlist,
+    fundamentalsData,
   } = usePortfolioStore();
   const { analysis, confirmedRegime } = useRegimeStore();
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [sortBy, setSortBy]         = useState<'score' | 'ticker' | 'gain'>('score');
+  const [sortBy, setSortBy]         = useState<'score' | 'ticker' | 'gain' | 'rank'>('score');
+  const [chartEntry, setChartEntry] = useState<ChartEntry | null>(null);
 
-  const bridgewaterRegime: string | undefined =
-    analysis?.bridgewater?.regime ?? settings.marketRegime ?? undefined;
-  const volRegime = analysis?.volatility?.regime;
+  const bridgewaterRegime: string | undefined = analysis?.bridgewater?.regime ?? settings.marketRegime ?? undefined;
+  const volRegime = analysis?.volatility?.level;
+  const spyBars   = ohlcvData['SPY'];
 
   const signalHoldings = useMemo(
     () => holdings.filter(h => h.assetClass !== 'cash'),
@@ -522,24 +819,60 @@ export function Signals() {
     for (const h of signalHoldings) {
       const bars = ohlcvData[h.ticker];
       if (bars && bars.length >= 20) {
-        result[h.ticker] = computeTechnicalSignals(bars, h.ticker, bridgewaterRegime);
+        const fund = fundamentalsData[h.ticker];
+        result[h.ticker] = computeTechnicalSignals(bars, h.ticker, bridgewaterRegime, {
+          entryPrice:       h.avgCostPerShare,
+          entryDate:        h.purchaseDate,
+          shortPctFloat:    fund?.shortPctFloat ?? null,
+          spyBars,
+          nextEarningsDate: fund?.nextEarningsDate ?? null,
+          livePrice:        h.currentPrice,
+        });
       }
     }
     return result;
-  }, [ohlcvData, signalHoldings, bridgewaterRegime]);
+  }, [ohlcvData, signalHoldings, bridgewaterRegime, fundamentalsData, spyBars]);
 
   const watchlistSignals = useMemo(() => {
     const result: Record<string, TechnicalSignals> = {};
     for (const w of watchlist) {
       const bars = ohlcvData[w.ticker];
       if (bars && bars.length >= 20) {
-        result[w.ticker] = computeTechnicalSignals(bars, w.ticker, bridgewaterRegime);
+        const fund = fundamentalsData[w.ticker];
+        result[w.ticker] = computeTechnicalSignals(bars, w.ticker, bridgewaterRegime, {
+          shortPctFloat:    fund?.shortPctFloat ?? null,
+          spyBars,
+          nextEarningsDate: fund?.nextEarningsDate ?? null,
+          livePrice:        w.currentPrice > 0 ? w.currentPrice : undefined,
+        });
       }
     }
     return result;
-  }, [ohlcvData, watchlist, bridgewaterRegime]);
+  }, [ohlcvData, watchlist, bridgewaterRegime, fundamentalsData, spyBars]);
 
-  // Summary counts (portfolio + watchlist)
+  // Cross-sectional relative strength rank (6M return, skip last 20 bars)
+  // Rank 1 = strongest 6M momentum in the universe
+  const csRanks = useMemo(() => {
+    const entries: { key: string; ret: number }[] = [];
+
+    const addEntry = (ticker: string, key: string) => {
+      const bars = ohlcvData[ticker];
+      if (!bars || bars.length < 40) return;
+      const cutoff = Math.max(0, bars.length - 21);
+      const startClose = bars[0].close;
+      const endClose   = bars[cutoff].close;
+      if (startClose > 0) entries.push({ key, ret: (endClose - startClose) / startClose });
+    };
+
+    for (const h of signalHoldings) addEntry(h.ticker, h.id);
+    for (const w of watchlist) addEntry(w.ticker, `wl-${w.ticker}`);
+
+    entries.sort((a, b) => b.ret - a.ret);
+    const ranks: Record<string, number> = {};
+    entries.forEach((e, i) => { ranks[e.key] = i + 1; });
+    return { ranks, total: entries.length };
+  }, [ohlcvData, signalHoldings, watchlist]);
+
   const counts = useMemo(() => {
     const c: Record<SignalRating, number> = { STRONG_BUY: 0, BUY: 0, NEUTRAL: 0, SELL: 0, STRONG_SELL: 0 };
     [...Object.values(portfolioSignals), ...Object.values(watchlistSignals)].forEach(s => c[s.rating]++);
@@ -554,16 +887,20 @@ export function Signals() {
       const sb = portfolioSignals[b.ticker];
       if (sortBy === 'score') {
         if (!sa && !sb) return 0;
-        if (!sa) return 1;
-        if (!sb) return -1;
+        if (!sa) return 1; if (!sb) return -1;
         return sb.score - sa.score;
       }
       if (sortBy === 'ticker') return a.ticker.localeCompare(b.ticker);
+      if (sortBy === 'rank') {
+        const ra = csRanks.ranks[a.id] ?? Infinity;
+        const rb = csRanks.ranks[b.id] ?? Infinity;
+        return ra - rb;
+      }
       const ga = (a.currentPrice - a.avgCostPerShare) / a.avgCostPerShare;
       const gb = (b.currentPrice - b.avgCostPerShare) / b.avgCostPerShare;
       return gb - ga;
     });
-  }, [signalHoldings, portfolioSignals, sortBy]);
+  }, [signalHoldings, portfolioSignals, sortBy, csRanks]);
 
   const hasPortfolioSignals = Object.keys(portfolioSignals).length > 0;
   const hasAnyData = hasPortfolioSignals || Object.keys(watchlistSignals).length > 0;
@@ -581,7 +918,7 @@ export function Signals() {
             Entry / Exit Signals
           </h1>
           <p className="text-sm text-slate-500 mt-0.5">
-            Technical analysis · 6-month daily OHLCV · RSI / MACD / Bollinger / ATR
+            RSI · MACD · Bollinger · ATR · CMF · TSMOM · Chandelier · Beta · Cross-sectional rank
           </p>
         </div>
         <button
@@ -613,7 +950,7 @@ export function Signals() {
               </p>
               {volRegime && (
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Volatility: <span className="text-slate-300">{volRegime}</span>
+                  Macro vol: <span className="text-slate-300">{volRegime}</span>
                   {(volRegime === 'HIGH' || volRegime === 'CRISIS') && (
                     <span className="text-amber-400 ml-2">· Reduce position sizes 30–50%</span>
                   )}
@@ -642,7 +979,7 @@ export function Signals() {
         </div>
       )}
 
-      {/* Summary + sort (only when there's data) */}
+      {/* Summary + sort */}
       {hasAnyData && (
         <>
           <div className="flex flex-wrap gap-2">
@@ -654,19 +991,25 @@ export function Signals() {
               </div>
             ))}
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <span className="text-xs text-slate-500">Sort:</span>
-            {(['score', 'ticker', 'gain'] as const).map(s => (
+            {(['score', 'rank', 'ticker', 'gain'] as const).map(s => (
               <button key={s} onClick={() => setSortBy(s)}
                 className={`text-xs px-2.5 py-1 rounded-lg transition-all ${sortBy === s ? 'bg-blue-600 text-white' : 'bg-slate-800 text-slate-400 hover:text-slate-200'}`}>
-                {s === 'score' ? 'Signal Score' : s === 'ticker' ? 'Ticker' : 'P&L'}
+                {s === 'score' ? 'Signal Score' : s === 'rank' ? '6M RS Rank' : s === 'ticker' ? 'Ticker' : 'P&L'}
               </button>
             ))}
+            {csRanks.total > 0 && (
+              <span className="text-[10px] text-slate-600 ml-1">
+                <TrendingUp size={10} className="inline mr-0.5" />
+                RS rank across {csRanks.total} tickers (Jegadeesh-Titman, skip last 20d)
+              </span>
+            )}
           </div>
         </>
       )}
 
-      {/* ── Portfolio holdings ─────────────────────────────────────────────── */}
+      {/* ── Portfolio holdings ──────────────────────────────────────────────── */}
       {signalHoldings.length > 0 && (
         <section>
           <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-3 flex items-center gap-2">
@@ -699,8 +1042,12 @@ export function Signals() {
                   sig={sig}
                   isSelected={selectedId === h.id}
                   onSelect={() => toggle(h.id)}
+                  onOpenChart={() => setChartEntry({ ticker: h.ticker, name: h.name, currency: h.currency, bars: ohlcvData[h.ticker], sig })}
                   portfolioValue={portfolioValue}
                   fxRate={fxRate}
+                  csRank={csRanks.ranks[h.id]}
+                  csTotal={csRanks.total}
+                  shortPct={fundamentalsData[h.ticker]?.shortPctFloat ?? null}
                 />
               );
             })}
@@ -708,7 +1055,7 @@ export function Signals() {
         </section>
       )}
 
-      {/* ── Watchlist ──────────────────────────────────────────────────────── */}
+      {/* ── Watchlist ───────────────────────────────────────────────────────── */}
       <section>
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-2">
@@ -734,7 +1081,14 @@ export function Signals() {
                 isSelected={selectedId === `wl-${w.ticker}`}
                 onSelect={() => toggle(`wl-${w.ticker}`)}
                 onRemove={() => removeFromWatchlist(w.ticker)}
+                onOpenChart={() => {
+                  const sig = watchlistSignals[w.ticker];
+                  if (sig) setChartEntry({ ticker: w.ticker, name: w.name, currency: w.currency, bars: ohlcvData[w.ticker], sig });
+                }}
                 portfolioValue={portfolioValue}
+                csRank={csRanks.ranks[`wl-${w.ticker}`]}
+                csTotal={csRanks.total}
+                shortPct={fundamentalsData[w.ticker]?.shortPctFloat ?? null}
               />
             ))}
           </div>
@@ -752,15 +1106,31 @@ export function Signals() {
         <div className="bg-slate-900/40 border border-slate-700/50 rounded-xl p-4">
           <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3">Signal Methodology</p>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs text-slate-500">
-            <div><p className="text-slate-400 font-medium mb-1">Trend (30%)</p><p>SMA20 vs SMA50 alignment · price position vs moving averages</p></div>
-            <div><p className="text-slate-400 font-medium mb-1">Momentum (30%)</p><p>MACD(12,26,9) crossover & histogram · RSI(14) Wilder smoothing</p></div>
-            <div><p className="text-slate-400 font-medium mb-1">Volatility (15%)</p><p>Bollinger Bands(20,2σ) · bandwidth squeeze detection</p></div>
-            <div><p className="text-slate-400 font-medium mb-1">Volume (15%)</p><p>Volume ratio vs 20-day avg · OBV trend (on-balance volume)</p></div>
+            <div><p className="text-slate-400 font-medium mb-1">Trend (30%)</p><p>SMA20/50 alignment · TSMOM gate: momentum capped at neutral when 6M return is negative</p></div>
+            <div><p className="text-slate-400 font-medium mb-1">Momentum (30%)</p><p>MACD(12,26,9) · RSI(14) Wilder · gated by 12M time-series momentum sign</p></div>
+            <div><p className="text-slate-400 font-medium mb-1">Volatility (15%)</p><p>BB(20,2σ) · %B · bandwidth squeeze · intra-vol regime shifts sub-score weights</p></div>
+            <div><p className="text-slate-400 font-medium mb-1">Volume (15%)</p><p>CMF(20) Chaikin Money Flow primary · volume ratio secondary · replaces raw OBV</p></div>
           </div>
-          <p className="mt-3 text-xs text-slate-600">
-            Scores are regime-adjusted (pulls toward neutral in adverse regimes). SMA200 requires 200 bars — only 6 months (~126) available; SMA20/50 cross used as proxy. For informational purposes only.
-          </p>
+          <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-3 text-xs text-slate-500 border-t border-slate-700/50 pt-3">
+            <div><p className="text-slate-400 font-medium mb-1">Exits</p><p>Chandelier Exit: max(close since entry) − 3×ATR(22). Ratchets up with position. ATR-based targets replace fixed %.</p></div>
+            <div><p className="text-slate-400 font-medium mb-1">RS Rank</p><p>Cross-sectional 6M return rank (George & Hwang 2004). Skip last 20d to avoid short-term reversal.</p></div>
+            <div><p className="text-slate-400 font-medium mb-1">Beta / Short</p><p>60-day rolling beta vs SPY. Short interest {'>'} 20% de-rates bullish signals (Oxford RAPS 2023).</p></div>
+            <div><p className="text-slate-400 font-medium mb-1">Vol Sizing</p><p>Vol-target multiplier: 0.3% daily vol contribution per position. High-vol stocks get smaller allocations.</p></div>
+          </div>
+          <p className="mt-2 text-xs text-slate-600">For informational purposes only. Not financial advice.</p>
         </div>
+      )}
+
+      {/* Chart modal */}
+      {chartEntry && (
+        <ChartModal
+          ticker={chartEntry.ticker}
+          name={chartEntry.name}
+          currency={chartEntry.currency}
+          bars={chartEntry.bars}
+          sig={chartEntry.sig}
+          onClose={() => setChartEntry(null)}
+        />
       )}
     </div>
   );

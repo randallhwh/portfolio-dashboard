@@ -367,6 +367,7 @@ export function TargetsTab() {
   const relevantClasses = ALL_CLASSES.filter(cls => (currentPct[cls] ?? 0) > 0.1 || (targets[cls] ?? 0) > 0);
 
   const applyRegime = (r: RegimeName) => {
+    if (r === 'UNKNOWN') return;
     updateSettings({
       marketRegime: r,
       targetAllocations: { ...ZERO_ALLOCS, ...REGIME_META[r].targets as Partial<Record<AssetClass, number>> },

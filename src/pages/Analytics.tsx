@@ -192,7 +192,7 @@ export function Analytics() {
                     />
                     <YAxis tick={{ fontSize: 11, fill: '#64748b' }} tickLine={false} axisLine={false} tickFormatter={v => `${v.toFixed(0)}%`} />
                     <Tooltip
-                      formatter={(v: number) => [`${v >= 0 ? '+' : ''}${v.toFixed(1)}%`, 'Return']}
+                      formatter={(v: unknown) => { const n = v as number; return [`${n >= 0 ? '+' : ''}${n.toFixed(1)}%`, 'Return']; }}
                       contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }}
                       itemStyle={{ color: '#f1f5f9' }}
                       labelStyle={{ color: '#94a3b8' }}

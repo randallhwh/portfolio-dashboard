@@ -55,6 +55,7 @@ export interface TradeInput {
   country?: string;
   notes?: string;
   annualYieldPct?: number;
+  cashHoldingId?: string;
 }
 
 export interface BenchmarkData {
@@ -110,6 +111,7 @@ export interface TechnicalSignals {
   bbMiddle: number | null;
   bbLower: number | null;
   bbBandwidth: number | null;
+  bbPctB: number | null;       // BB %B: 0 = at lower band, 1 = at upper band
   atr: number | null;
   volumeRatio: number | null;
   goldenCross: boolean;
@@ -117,9 +119,38 @@ export interface TechnicalSignals {
   bbSqueeze: boolean;
   oversold: boolean;
   overbought: boolean;
-  suggestedStop: number | null;
-  tier1Target: number | null;
-  tier2Target: number | null;
+  suggestedStop: number | null;  // price − 2×ATR (entry-based, for new positions)
+  chandelierStop: number | null; // max(close since entry) − 3×ATR(22) — ratcheting trailing stop
+  tier1Target: number | null;    // price + 1.5×ATR (replaces fixed +3%)
+  tier2Target: number | null;    // price + 3.0×ATR (replaces fixed +6%)
+  // Corwin-Schultz spread estimate from daily OHLC (Corwin & Schultz, 2012)
+  csSpreadPct: number | null;  // bid-ask spread as %, e.g. 0.08 = 8 bps
+  // Alpha decay (Di Mascio, Lines & Naik 2021; Kaminski & Lo 2014)
+  signalType: 'momentum' | 'mean_reversion' | 'neutral';
+  signalAgeBars: number;       // consecutive bars the current signal has been active
+  decayPct: number;            // estimated % of original edge remaining (100 = fresh)
+  // Entry guidance
+  entryLimit: number | null;   // ideal limit-order entry price (SMA20 pullback / current for oversold)
+  entryBreakout: number | null; // breakout entry above this price (BB upper for squeeze plays)
+  entryQuality: 'ideal' | 'ok' | 'stretched' | 'avoid'; // how extended price is from ideal entry
+  entryNote: string;           // plain-English rationale for the entry recommendation
+  // Tier 1: George & Hwang (2004) 52-week high ratio
+  pth52wk: number | null;      // price / 6M high (52wk high proxy); 1.0 = at high
+  isNew52wkHigh: boolean;      // price within 0.5% of 6M high
+  // Tier 2: Chaikin Money Flow (accumulation/distribution)
+  cmf20: number | null;        // CMF(20): >0.1 accumulation, <−0.1 distribution
+  // Tier 2: Time-Series Momentum gate (Moskowitz, Ooi & Pedersen 2012)
+  tsmomBullish: boolean;       // 6M total return > 0; gates momentum sub-scores
+  // Tier 2: Intrastock volatility regime
+  rv21d: number | null;        // 21-day realized vol, annualized
+  intraVolRegime: 'low' | 'normal' | 'high'; // modulates sub-score weights
+  // Tier 3: Market sensitivity
+  betaVsSpy: number | null;    // 60-day rolling beta vs SPY
+  // Tier 3: Earnings proximity
+  daysToEarnings: number | null; // calendar days to next earnings (negative = past)
+  nearEarnings: boolean;         // within 7 calendar days of earnings event
+  // Tier 3: ML feature vector (normalized indicators for offline model training)
+  featureVector: number[];
 }
 
 export interface WatchlistEntry {

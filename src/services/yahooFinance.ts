@@ -46,7 +46,7 @@ function findClosestPrice(
 async function fetchSingle(symbol: string): Promise<QuoteResult | null> {
   try {
     // 6 months of daily data covers 1d / 7d / 30d and YTD (Jan 1 of current year)
-    const url = `/yf/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=6mo`;
+    const url = `/api/yf/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=6mo`;
     const res = await fetch(url);
     if (!res.ok) return null;
     const data = await res.json();
@@ -111,4 +111,63 @@ export async function fetchQuotes(symbols: string[]): Promise<QuoteResult[]> {
   return results
     .filter((r): r is PromiseFulfilledResult<QuoteResult> => r.status === 'fulfilled' && r.value !== null)
     .map((r) => r.value);
+}
+
+// ─── Fundamentals: short interest + earnings ─────────────────────────────────
+
+export interface FundamentalsData {
+  ticker: string;
+  shortPctFloat: number | null;         // short interest as % of float (0–1 scale)
+  nextEarningsDate: string | null;      // ISO date of next (or most recent) earnings
+  lastEarningsSurprisePct: number | null; // (actual − estimate) / |estimate| × 100
+}
+
+async function fetchSingleFundamentals(ticker: string): Promise<FundamentalsData | null> {
+  try {
+    const modules = 'defaultKeyStatistics%2CcalendarEvents%2CearningsHistory';
+    const url = `/api/yf/v10/finance/quoteSummary/${encodeURIComponent(ticker)}?modules=${modules}`;
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const result = data?.quoteSummary?.result?.[0];
+    if (!result) return null;
+
+    // Short interest
+    const shortPctFloat: number | null = result.defaultKeyStatistics?.shortPercentOfFloat?.raw ?? null;
+
+    // Next earnings date (closest future date, or most recent past)
+    let nextEarningsDate: string | null = null;
+    const earningsDates = result.calendarEvents?.earnings?.earningsDate as { raw: number }[] | undefined;
+    if (earningsDates && earningsDates.length > 0) {
+      const nowSec = Date.now() / 1000;
+      const sorted = [...earningsDates].sort((a, b) => a.raw - b.raw);
+      // Prefer future date; fall back to most recent past (within 14 days)
+      const future = sorted.find(d => d.raw > nowSec - 7 * 86400);
+      if (future) nextEarningsDate = new Date(future.raw * 1000).toISOString().split('T')[0];
+    }
+
+    // Last earnings surprise
+    let lastEarningsSurprisePct: number | null = null;
+    const history = result.earningsHistory?.history as { epsActual?: { raw: number }; epsEstimate?: { raw: number } }[] | undefined;
+    if (history && history.length > 0) {
+      const last = history[history.length - 1];
+      const actual = last?.epsActual?.raw;
+      const estimate = last?.epsEstimate?.raw;
+      if (actual != null && estimate != null && estimate !== 0) {
+        lastEarningsSurprisePct = Math.round(((actual - estimate) / Math.abs(estimate)) * 1000) / 10;
+      }
+    }
+
+    return { ticker, shortPctFloat, nextEarningsDate, lastEarningsSurprisePct };
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchFundamentals(tickers: string[]): Promise<FundamentalsData[]> {
+  const unique = [...new Set(tickers)];
+  const results = await Promise.allSettled(unique.map(fetchSingleFundamentals));
+  return results
+    .filter((r): r is PromiseFulfilledResult<FundamentalsData> => r.status === 'fulfilled' && r.value !== null)
+    .map(r => r.value);
 }

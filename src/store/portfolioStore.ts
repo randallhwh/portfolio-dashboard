@@ -1,7 +1,8 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type { Holding, Transaction, TradeInput, PortfolioSettings, PortfolioSnapshot, BiasAlert, Currency, ExchangeRates, OHLCVBar, WatchlistEntry } from '../types/portfolio';
-import { fetchQuotes, FX_SYMBOLS } from '../services/yahooFinance';
+import { fetchQuotes, fetchFundamentals, FX_SYMBOLS } from '../services/yahooFinance';
+import type { FundamentalsData } from '../services/yahooFinance';
 
 // Converts amount in `currency` to the base currency.
 // Rates map: how many base-currency units does 1 unit of `currency` equal.
@@ -38,11 +39,12 @@ interface PortfolioState {
   // All rates expressed as "how many USD does 1 unit of this currency equal"
   // e.g. SGD: 0.746 means 1 SGD = 0.746 USD
   exchangeRates: ExchangeRates;
-  activeView: 'dashboard' | 'holdings' | 'bias' | 'analytics' | 'returns' | 'regime' | 'signals';
+  activeView: 'dashboard' | 'holdings' | 'bias' | 'analytics' | 'returns' | 'regime' | 'signals' | 'docs';
   ohlcvData: Record<string, OHLCVBar[]>;
   watchlist: WatchlistEntry[];
   activePortfolio: string; // 'all' or an account name
   priceHistory: Record<string, { prev1d?: number; prev7d?: number; prev30d?: number; prevYtd?: number }>;
+  fundamentalsData: Record<string, FundamentalsData>; // short interest + earnings per ticker
   priceStatus: 'idle' | 'loading' | 'success' | 'error';
   lastUpdated: string | null; // ISO timestamp
 
@@ -466,6 +468,7 @@ export const usePortfolioStore = create<PortfolioState>()(
       priceHistory: {},
       ohlcvData: {},
       watchlist: [],
+      fundamentalsData: {},
       priceStatus: 'idle' as const,
       lastUpdated: null,
 
@@ -515,19 +518,21 @@ export const usePortfolioStore = create<PortfolioState>()(
             const newQty = existing.quantity + trade.quantity;
             const newAvg = (oldTotalCost + newTradeCost) / newQty;
             tx.holdingId = existing.id;
-            set((state) => ({
-              holdings: state.holdings.map((h) =>
-                h.id === existing.id
-                  ? {
-                      ...h,
-                      quantity: newQty,
-                      avgCostPerShare: newAvg,
-                      currentPrice: trade.pricePerShare,
-                      // Only overwrite yield if explicitly provided
-                      ...(trade.annualYieldPct !== undefined ? { annualYieldPct: trade.annualYieldPct } : {}),
-                    }
-                  : h
-              ),
+            const buyCashDelta = -(trade.quantity * trade.pricePerShare + trade.commission);
+          set((state) => ({
+              holdings: state.holdings.map((h) => {
+                if (h.id === existing.id)
+                  return {
+                    ...h,
+                    quantity: newQty,
+                    avgCostPerShare: newAvg,
+                    currentPrice: trade.pricePerShare,
+                    ...(trade.annualYieldPct !== undefined ? { annualYieldPct: trade.annualYieldPct } : {}),
+                  };
+                if (trade.cashHoldingId && h.id === trade.cashHoldingId)
+                  return { ...h, quantity: h.quantity + buyCashDelta };
+                return h;
+              }),
               transactions: [...state.transactions, tx],
             }));
           } else {
@@ -550,8 +555,16 @@ export const usePortfolioStore = create<PortfolioState>()(
               annualYieldPct: trade.annualYieldPct,
             };
             tx.holdingId = holdingId;
+            const buyCashDeltaNew = -(trade.quantity * trade.pricePerShare + trade.commission);
             set((state) => ({
-              holdings: [...state.holdings, newHolding],
+              holdings: [
+                ...state.holdings.map((h) =>
+                  trade.cashHoldingId && h.id === trade.cashHoldingId
+                    ? { ...h, quantity: h.quantity + buyCashDeltaNew }
+                    : h
+                ),
+                newHolding,
+              ],
               transactions: [...state.transactions, tx],
             }));
           }
@@ -579,12 +592,16 @@ export const usePortfolioStore = create<PortfolioState>()(
             notes: trade.notes,
           };
 
+          const sellCashDelta = trade.quantity * trade.pricePerShare - trade.commission;
           set((state) => ({
-            holdings: newQty === 0
-              ? state.holdings.filter((h) => h.id !== existing.id)
-              : state.holdings.map((h) =>
-                  h.id === existing.id ? { ...h, quantity: newQty } : h
-                ),
+            holdings: state.holdings
+              .filter((h) => !(newQty === 0 && h.id === existing.id))
+              .map((h) => {
+                if (h.id === existing.id) return { ...h, quantity: newQty };
+                if (trade.cashHoldingId && h.id === trade.cashHoldingId)
+                  return { ...h, quantity: h.quantity + sellCashDelta };
+                return h;
+              }),
             transactions: [...state.transactions, tx],
           }));
           return { success: true };
@@ -617,6 +634,7 @@ export const usePortfolioStore = create<PortfolioState>()(
 
         try {
           // Collect all holding tickers + watchlist tickers + FX symbols
+          // Always include SPY for beta computation
           const holdingTickers = [...new Set(holdings.map((h) => h.ticker))];
           const watchlistTickers = watchlist.map((w) => w.ticker);
           const usedCurrencies = [...new Set(holdings.map((h) => h.currency))].filter(
@@ -626,7 +644,7 @@ export const usePortfolioStore = create<PortfolioState>()(
             .map((c) => FX_SYMBOLS[c])
             .filter(Boolean);
 
-          const allSymbols = [...new Set([...holdingTickers, ...watchlistTickers, ...fxTickers])];
+          const allSymbols = [...new Set([...holdingTickers, ...watchlistTickers, ...fxTickers, 'SPY'])];
           const results = await fetchQuotes(allSymbols);
 
           if (results.length === 0) {
@@ -637,7 +655,7 @@ export const usePortfolioStore = create<PortfolioState>()(
           // Build lookup maps
           const priceMap: Record<string, number> = {};
           const yieldMap: Record<string, number> = {};
-          const historyMap: Record<string, { prev1d?: number; prev7d?: number; prev30d?: number }> = {};
+          const historyMap: Record<string, { prev1d?: number; prev7d?: number; prev30d?: number; prevYtd?: number }> = {};
           const newOhlcv: Record<string, OHLCVBar[]> = {};
           const holdingTickerSet = new Set(holdingTickers);
           const watchlistTickerSet = new Set(watchlistTickers);
@@ -647,15 +665,25 @@ export const usePortfolioStore = create<PortfolioState>()(
             if (r.prev1d != null || r.prev7d != null || r.prev30d != null || r.prevYtd != null) {
               historyMap[r.symbol] = { prev1d: r.prev1d, prev7d: r.prev7d, prev30d: r.prev30d, prevYtd: r.prevYtd };
             }
-            // Store OHLCV for holdings and watchlist (not FX pairs)
-            if ((holdingTickerSet.has(r.symbol) || watchlistTickerSet.has(r.symbol)) && r.ohlcv && r.ohlcv.length > 0) {
+            // Store OHLCV for holdings, watchlist, and SPY (for beta)
+            if ((holdingTickerSet.has(r.symbol) || watchlistTickerSet.has(r.symbol) || r.symbol === 'SPY') && r.ohlcv && r.ohlcv.length > 0) {
               newOhlcv[r.symbol] = r.ohlcv;
             }
           });
 
+          // Fetch fundamentals (short interest + earnings) for equities
+          const fundamentalsTickers = [
+            ...holdingTickers.filter(t => !fxTickers.includes(t)),
+            ...watchlistTickers,
+          ];
+          const fundResults = await fetchFundamentals(fundamentalsTickers);
+          const newFundamentals: Record<string, FundamentalsData> = {};
+          fundResults.forEach(f => { newFundamentals[f.ticker] = f; });
+
           set((state) => ({
             priceHistory: { ...state.priceHistory, ...historyMap },
             ohlcvData: { ...state.ohlcvData, ...newOhlcv },
+            fundamentalsData: { ...state.fundamentalsData, ...newFundamentals },
             holdings: state.holdings.map((h) => {
               if (h.assetClass === 'cash') return h; // never overwrite cash price or yield
               const updates: Partial<Holding> = {};
@@ -769,7 +797,7 @@ export const usePortfolioStore = create<PortfolioState>()(
     }),
     {
       name: 'portfolio-store',
-      version: 15,
+      version: 16,
       migrate: () => ({
         holdings: INITIAL_HOLDINGS,
         transactions: [],
@@ -799,7 +827,8 @@ export const usePortfolioStore = create<PortfolioState>()(
         priceHistory: {},
         ohlcvData: {},
         watchlist: [],
-      }),
+        fundamentalsData: {},
+      }) as unknown as PortfolioState,
       // ohlcvData is in-memory only (can be large; regenerated on next price refresh)
       partialize: (state: PortfolioState) => {
         // eslint-disable-next-line @typescript-eslint/no-unused-vars
