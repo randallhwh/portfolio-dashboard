@@ -302,7 +302,7 @@ function realizedVol(prices: number[], days: number): number {
 async function fetchHistory(ticker: string): Promise<number[]> {
   try {
     // 6mo matches the working stock-price fetcher; ~126 trading days is enough for all signals
-    const url = `/yf/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=6mo`;
+    const url = `/api/yf/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=6mo`;
     const res = await fetch(url);
     if (!res.ok) {
       console.warn(`[regime] ${ticker}: HTTP ${res.status}`);
