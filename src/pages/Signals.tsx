@@ -6,9 +6,9 @@ import {
 } from 'lucide-react';
 import { usePortfolioStore, toBase } from '../store/portfolioStore';
 import { useRegimeStore } from '../store/regimeStore';
-import { computeTechnicalSignals } from '../services/technicals';
+import { computeTechnicalSignals, computeDailySentiment } from '../services/technicals';
 import { ChartModal } from '../components/signals/ChartModal';
-import type { TechnicalSignals, SignalRating, Holding, WatchlistEntry, OHLCVBar } from '../types/portfolio';
+import type { TechnicalSignals, SignalRating, DailySentiment, Holding, WatchlistEntry, OHLCVBar } from '../types/portfolio';
 
 type ChartEntry = { ticker: string; name: string; currency: string; bars: OHLCVBar[]; sig: TechnicalSignals };
 
@@ -23,6 +23,27 @@ const RATING_CFG: Record<SignalRating, { label: string; bgCls: string; textCls: 
 };
 
 const RATING_ORDER: SignalRating[] = ['STRONG_BUY', 'BUY', 'NEUTRAL', 'SELL', 'STRONG_SELL'];
+
+const DAILY_CFG: Record<DailySentiment['label'], {
+  label: string; dotCls: string; bgCls: string; textCls: string; barCls: string;
+}> = {
+  bullish:      { label: 'Bullish',   dotCls: 'bg-emerald-400', bgCls: 'bg-emerald-500/15', textCls: 'text-emerald-400', barCls: 'bg-emerald-500' },
+  lean_bullish: { label: 'Lean Buy',  dotCls: 'bg-green-400',   bgCls: 'bg-green-500/15',   textCls: 'text-green-400',   barCls: 'bg-green-500'   },
+  neutral:      { label: 'Neutral',   dotCls: 'bg-slate-400',   bgCls: 'bg-slate-700/60',   textCls: 'text-slate-400',   barCls: 'bg-slate-500'   },
+  lean_bearish: { label: 'Lean Sell', dotCls: 'bg-amber-400',   bgCls: 'bg-amber-500/15',   textCls: 'text-amber-400',   barCls: 'bg-amber-500'   },
+  bearish:      { label: 'Bearish',   dotCls: 'bg-red-400',     bgCls: 'bg-red-500/15',     textCls: 'text-red-400',     barCls: 'bg-red-500'     },
+};
+
+function DailyPulseBadge({ ds }: { ds: DailySentiment | undefined }) {
+  if (!ds) return null;
+  const c = DAILY_CFG[ds.label];
+  return (
+    <span className={`inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded font-medium ${c.bgCls} ${c.textCls}`}>
+      <span className={`w-1.5 h-1.5 rounded-full ${c.dotCls}`} />
+      {c.label}
+    </span>
+  );
+}
 
 function scoreBarCls(score: number) {
   if (score >= 75) return 'bg-emerald-500';
@@ -122,6 +143,7 @@ function DetailPanel({
   fxRate,
   csRank,
   csTotal,
+  dailySentiment,
 }: {
   ticker: string;
   currency: string;
@@ -132,6 +154,7 @@ function DetailPanel({
   fxRate: number;
   csRank?: number;
   csTotal?: number;
+  dailySentiment?: DailySentiment;
 }) {
   const hardStop = avgCostPerShare != null ? avgCostPerShare * 0.92 : null;
   const riskPerTrade2pct = portfolioValue * 0.02;
@@ -289,6 +312,42 @@ function DetailPanel({
               </div>
               <p className="text-[10px] text-slate-600 border-t border-slate-700/50 pt-1.5">
                 0.4·M (SMA20 deviation) + 0.3·FM (SMA10 deviation) + 0.3·(D−S) (volume demand/supply)
+              </p>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ── Daily Pulse ──────────────────────────────────────────────────── */}
+      {dailySentiment && (() => {
+        const c = DAILY_CFG[dailySentiment.label];
+        return (
+          <div>
+            <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Daily Pulse</p>
+            <div className={`border ${c.bgCls.replace('/15', '/20')} border-slate-700/60 rounded-xl p-4 space-y-3`}>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className={`w-2 h-2 rounded-full ${c.dotCls}`} />
+                  <span className={`text-sm font-bold ${c.textCls}`}>{c.label}</span>
+                  <span className="text-xs text-slate-500 font-mono">{dailySentiment.score}/100</span>
+                </div>
+                <div className="flex-1 mx-3 h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                  <div className={`h-full rounded-full transition-all ${c.barCls}`} style={{ width: `${dailySentiment.score}%` }} />
+                </div>
+              </div>
+              <div className="space-y-1">
+                {dailySentiment.components.map(comp => (
+                  <div key={comp.label} className="flex items-start justify-between gap-2">
+                    <span className="text-[10px] text-slate-500 w-24 shrink-0">{comp.label}</span>
+                    <span className={`text-[10px] font-mono shrink-0 w-8 text-right ${comp.score > 0 ? 'text-emerald-400' : comp.score < 0 ? 'text-red-400' : 'text-slate-500'}`}>
+                      {comp.score > 0 ? `+${comp.score}` : comp.score === 0 ? '—' : comp.score}
+                    </span>
+                    <span className="text-[10px] text-slate-500 flex-1 text-right">{comp.note}</span>
+                  </div>
+                ))}
+              </div>
+              <p className="text-[10px] text-slate-600 border-t border-slate-700/50 pt-1.5">
+                RSI(2) timing · Volume conviction · Candle quality · SMA5 trend · Day return · Flame momentum
               </p>
             </div>
           </div>
@@ -532,7 +591,7 @@ function SignalFlags({ sig, shortPct }: { sig: TechnicalSignals; shortPct?: numb
 
 function PortfolioSignalCard({
   holding, sig, isSelected, onSelect, onOpenChart, portfolioValue, fxRate,
-  csRank, csTotal, shortPct,
+  csRank, csTotal, shortPct, dailySentiment,
 }: {
   holding: Holding;
   sig: TechnicalSignals;
@@ -544,6 +603,7 @@ function PortfolioSignalCard({
   csRank?: number;
   csTotal?: number;
   shortPct?: number | null;
+  dailySentiment?: DailySentiment;
 }) {
   const cfg    = RATING_CFG[sig.rating];
   const gainPct = ((holding.currentPrice - holding.avgCostPerShare) / holding.avgCostPerShare) * 100;
@@ -578,6 +638,7 @@ function PortfolioSignalCard({
                   #{csRank}/{csTotal}
                 </span>
               )}
+              <DailyPulseBadge ds={dailySentiment} />
             </div>
             <p className="text-xs text-slate-500 mt-0.5 truncate max-w-[160px]">{holding.name}</p>
           </div>
@@ -642,6 +703,7 @@ function PortfolioSignalCard({
           fxRate={fxRate}
           csRank={csRank}
           csTotal={csTotal}
+          dailySentiment={dailySentiment}
         />
       )}
     </div>
@@ -651,7 +713,7 @@ function PortfolioSignalCard({
 // ─── Watchlist signal card ────────────────────────────────────────────────────
 
 function WatchlistSignalCard({
-  entry, sig, isSelected, onSelect, onRemove, onOpenChart, portfolioValue, csRank, csTotal, shortPct,
+  entry, sig, isSelected, onSelect, onRemove, onOpenChart, portfolioValue, csRank, csTotal, shortPct, dailySentiment,
 }: {
   entry: WatchlistEntry;
   sig: TechnicalSignals | undefined;
@@ -663,6 +725,7 @@ function WatchlistSignalCard({
   csRank?: number;
   csTotal?: number;
   shortPct?: number | null;
+  dailySentiment?: DailySentiment;
 }) {
   const cfg = sig ? RATING_CFG[sig.rating] : null;
   const macdBull = sig?.macdHistogram != null && sig.macdHistogram > 0;
@@ -693,6 +756,7 @@ function WatchlistSignalCard({
                 </span>
               )}
               <span className="text-[10px] px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-400 font-medium">Watchlist</span>
+              <DailyPulseBadge ds={dailySentiment} />
             </div>
             <p className="text-xs text-slate-500 mt-0.5 truncate max-w-[160px]">{entry.name}</p>
           </button>
@@ -770,6 +834,7 @@ function WatchlistSignalCard({
           fxRate={1}
           csRank={csRank}
           csTotal={csTotal}
+          dailySentiment={dailySentiment}
         />
       )}
     </div>
@@ -842,7 +907,7 @@ export function Signals() {
     watchlist, addToWatchlist, removeFromWatchlist,
     fundamentalsData,
   } = usePortfolioStore();
-  const { analysis, confirmedRegime } = useRegimeStore();
+  const { analysis, confirmedRegime, indicators: regimeIndicators } = useRegimeStore();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [sortBy, setSortBy]         = useState<'score' | 'ticker' | 'gain' | 'rank'>('score');
   const [chartEntry, setChartEntry] = useState<ChartEntry | null>(null);
@@ -893,6 +958,51 @@ export function Signals() {
     }
     return result;
   }, [ohlcvData, watchlist, bridgewaterRegime, fundamentalsData, spyBars, settings.investingStyle]);
+
+  const portfolioDailyPulse = useMemo(() => {
+    const result: Record<string, DailySentiment> = {};
+    for (const h of signalHoldings) {
+      const bars = ohlcvData[h.ticker];
+      if (bars && bars.length >= 6) {
+        result[h.ticker] = computeDailySentiment(bars, {
+          livePrice:    h.currentPrice,
+          flameWeekly:  portfolioSignals[h.ticker]?.flameWeekly ?? null,
+        });
+      }
+    }
+    return result;
+  }, [ohlcvData, signalHoldings, portfolioSignals]);
+
+  const watchlistDailyPulse = useMemo(() => {
+    const result: Record<string, DailySentiment> = {};
+    for (const w of watchlist) {
+      const bars = ohlcvData[w.ticker];
+      if (bars && bars.length >= 6) {
+        result[w.ticker] = computeDailySentiment(bars, {
+          livePrice:    w.currentPrice > 0 ? w.currentPrice : undefined,
+          flameWeekly:  watchlistSignals[w.ticker]?.flameWeekly ?? null,
+        });
+      }
+    }
+    return result;
+  }, [ohlcvData, watchlist, watchlistSignals]);
+
+  const marketPulse = useMemo(() => {
+    const vixArr = regimeIndicators['^VIX'] ?? [];
+    const vixNow  = vixArr.length > 0 ? vixArr[vixArr.length - 1] : null;
+    const iwmArr  = regimeIndicators['IWM']  ?? [];
+    const spyArr  = regimeIndicators['SPY']  ?? [];
+    // Breadth: IWM/SPY 5d return delta (positive = small-caps leading = broad risk appetite)
+    const breadthDelta = iwmArr.length >= 6 && spyArr.length >= 6
+      ? ((iwmArr[iwmArr.length-1] / iwmArr[iwmArr.length-6]) - (spyArr[spyArr.length-1] / spyArr[spyArr.length-6])) * 100
+      : null;
+    if (!spyBars || spyBars.length < 6) return null;
+    const spyPulse = computeDailySentiment(spyBars);
+    const spyReturn = spyBars.length >= 2
+      ? (spyBars[spyBars.length-1].close - spyBars[spyBars.length-2].close) / spyBars[spyBars.length-2].close * 100
+      : null;
+    return { pulse: spyPulse, vix: vixNow, spyReturn, breadthDelta };
+  }, [spyBars, regimeIndicators]);
 
   // Cross-sectional relative strength rank (6M return, skip last 20 bars)
   // Rank 1 = strongest 6M momentum in the universe
@@ -1030,6 +1140,58 @@ export function Signals() {
         </div>
       )}
 
+      {/* Market Pulse */}
+      {marketPulse && (() => {
+        const c = DAILY_CFG[marketPulse.pulse.label];
+        const vix = marketPulse.vix;
+        const vixLabel = vix == null ? null : vix > 30 ? 'Crisis' : vix > 25 ? 'High' : vix > 20 ? 'Elevated' : vix > 15 ? 'Normal' : 'Low';
+        const vixCls = vix == null ? 'text-slate-400' : vix > 25 ? 'text-red-400' : vix > 20 ? 'text-amber-400' : 'text-emerald-400';
+        const breadth = marketPulse.breadthDelta;
+        return (
+          <div className="bg-slate-900/60 border border-slate-700 rounded-xl px-4 py-3">
+            <div className="flex items-center justify-between flex-wrap gap-3">
+              <div className="flex items-center gap-3">
+                <Activity size={14} className={c.textCls} />
+                <div>
+                  <p className="text-[10px] text-slate-500 uppercase tracking-wider font-semibold">Market Pulse · Today</p>
+                  <div className="flex items-center gap-2 mt-0.5">
+                    <span className={`text-sm font-bold ${c.textCls}`}>{c.label}</span>
+                    <span className="text-xs text-slate-500 font-mono">{marketPulse.pulse.score}/100</span>
+                    {marketPulse.spyReturn != null && (
+                      <span className={`text-xs font-mono ${marketPulse.spyReturn >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                        SPY {marketPulse.spyReturn >= 0 ? '+' : ''}{marketPulse.spyReturn.toFixed(2)}%
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center gap-4 text-xs">
+                {vix != null && (
+                  <div className="text-center">
+                    <p className="text-slate-500 text-[10px]">VIX</p>
+                    <p className={`font-semibold font-mono ${vixCls}`}>{vix.toFixed(1)} <span className="font-normal text-[10px]">{vixLabel}</span></p>
+                  </div>
+                )}
+                {breadth != null && (
+                  <div className="text-center">
+                    <p className="text-slate-500 text-[10px]">IWM/SPY 5d</p>
+                    <p className={`font-semibold font-mono ${breadth > 0.5 ? 'text-emerald-400' : breadth < -0.5 ? 'text-amber-400' : 'text-slate-400'}`}>
+                      {breadth >= 0 ? '+' : ''}{breadth.toFixed(1)}%
+                    </p>
+                  </div>
+                )}
+                <div className="text-center">
+                  <p className="text-slate-500 text-[10px]">RSI(2)</p>
+                  <p className={`font-semibold font-mono ${marketPulse.pulse.rsi2 != null && marketPulse.pulse.rsi2 < 25 ? 'text-emerald-400' : marketPulse.pulse.rsi2 != null && marketPulse.pulse.rsi2 > 75 ? 'text-red-400' : 'text-slate-300'}`}>
+                    {marketPulse.pulse.rsi2 != null ? marketPulse.pulse.rsi2.toFixed(1) : '—'}
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {/* No data state */}
       {!hasAnyData && watchlist.length === 0 && (
         <div className="bg-slate-900/40 border border-slate-700 rounded-xl p-8 text-center">
@@ -1110,6 +1272,7 @@ export function Signals() {
                   csRank={csRanks.ranks[h.id]}
                   csTotal={csRanks.total}
                   shortPct={fundamentalsData[h.ticker]?.shortPctFloat ?? null}
+                  dailySentiment={portfolioDailyPulse[h.ticker]}
                 />
               );
             })}
@@ -1151,6 +1314,7 @@ export function Signals() {
                 csRank={csRanks.ranks[`wl-${w.ticker}`]}
                 csTotal={csRanks.total}
                 shortPct={fundamentalsData[w.ticker]?.shortPctFloat ?? null}
+                dailySentiment={watchlistDailyPulse[w.ticker]}
               />
             ))}
           </div>

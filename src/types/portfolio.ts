@@ -157,6 +157,17 @@ export interface TechnicalSignals {
   flameHistory: { date: string; flameWeekly: number | null; flameMonthly: number | null }[];
 }
 
+export interface DailySentiment {
+  score: number;         // 0–100
+  label: 'bullish' | 'lean_bullish' | 'neutral' | 'lean_bearish' | 'bearish';
+  rsi2: number | null;
+  todayReturnPct: number | null;
+  volumeSurge: number | null;   // ratio vs 20d avg volume
+  sma5Position: 'above' | 'below' | null;
+  candleQuality: 'strong_bull' | 'bull' | 'neutral' | 'bear' | 'strong_bear' | null;
+  components: { label: string; score: number; note: string }[];
+}
+
 export interface WatchlistEntry {
   ticker: string;
   name: string;

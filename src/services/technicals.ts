@@ -1,4 +1,4 @@
-import type { OHLCVBar, TechnicalSignals, SignalRating } from '../types/portfolio';
+import type { OHLCVBar, TechnicalSignals, SignalRating, DailySentiment } from '../types/portfolio';
 
 // ─── Indicator helpers ────────────────────────────────────────────────────────
 
@@ -769,4 +769,131 @@ export function computeTechnicalSignals(
     flameMonthly: flameMonthly != null ? Math.round(flameMonthly * 100) / 100 : null,
     flameHistory,
   };
+}
+
+// ─── Daily Sentiment ──────────────────────────────────────────────────────────
+// Short-horizon (1-day) composite: RSI(2) timing + volume pressure + candle +
+// SMA5 position + today's return + Flame weekly.  Score 0–100; 50 = neutral.
+
+export function computeDailySentiment(
+  bars: OHLCVBar[],
+  opts?: { livePrice?: number; flameWeekly?: number | null },
+): DailySentiment {
+  const EMPTY: DailySentiment = {
+    score: 50, label: 'neutral', rsi2: null, todayReturnPct: null,
+    volumeSurge: null, sma5Position: null, candleQuality: null, components: [],
+  };
+  const n = bars.length;
+  if (n < 6) return EMPTY;
+
+  const closes  = bars.map(b => b.close);
+  const price   = opts?.livePrice ?? closes[n - 1];
+  const prevClose = closes[n - 2];
+  const todayReturnPct = prevClose > 0 ? (price - prevClose) / prevClose * 100 : null;
+
+  const rsi2arr  = computeRSI(closes, 2);
+  const rsi2     = rsi2arr[n - 1];
+
+  const volumes  = bars.map(b => b.volume);
+  const vol20sma = computeSMA(volumes, 20);
+  const volAvg   = vol20sma[n - 1];
+  const volumeSurge = (volAvg != null && volAvg > 0) ? bars[n - 1].volume / volAvg : null;
+
+  const bar      = bars[n - 1];
+  const range    = bar.high - bar.low;
+  const candlePos = range > 0.001 * Math.max(price, 0.01) ? (price - bar.low) / range : null;
+
+  const sma5arr  = computeSMA(closes, 5);
+  const sma5     = sma5arr[n - 1];
+  const sma5Position: DailySentiment['sma5Position'] = sma5 != null ? (price >= sma5 ? 'above' : 'below') : null;
+
+  const components: DailySentiment['components'] = [];
+  let total = 0;
+
+  // RSI(2) — ±30 (Connors mean-reversion timing)
+  if (rsi2 != null) {
+    const c = rsi2 < 5 ? 30 : rsi2 < 10 ? 20 : rsi2 < 25 ? 10
+            : rsi2 > 95 ? -30 : rsi2 > 90 ? -20 : rsi2 > 75 ? -10 : 0;
+    const note = rsi2 < 10  ? `${rsi2.toFixed(1)} — oversold, mean-reversion setup`
+               : rsi2 > 90  ? `${rsi2.toFixed(1)} — overbought, pullback risk`
+               : rsi2 < 25  ? `${rsi2.toFixed(1)} — mildly oversold`
+               : rsi2 > 75  ? `${rsi2.toFixed(1)} — mildly overbought`
+               : `${rsi2.toFixed(1)} — neutral zone`;
+    components.push({ label: 'RSI(2)', score: c, note });
+    total += c;
+  }
+
+  // Volume × price direction — ±15 (institutional conviction)
+  if (volumeSurge != null && todayReturnPct != null) {
+    const up = todayReturnPct >= 0;
+    const c  = volumeSurge > 1.5 ? (up ? 15 : -15)
+             : volumeSurge > 1.2 ? (up ?  8 :  -8)
+             : volumeSurge < 0.7 ? (up ? -5 :   5)
+             : 0;
+    const note = volumeSurge > 1.5
+      ? `${volumeSurge.toFixed(1)}× avg — ${up ? 'strong institutional buying' : 'heavy distribution'}`
+      : volumeSurge > 1.2
+      ? `${volumeSurge.toFixed(1)}× avg — ${up ? 'healthy demand' : 'notable selling'}`
+      : volumeSurge < 0.7
+      ? `${volumeSurge.toFixed(1)}× avg — ${up ? 'light-volume rally (low conviction)' : 'light-volume dip (less concern)'}`
+      : `${volumeSurge.toFixed(1)}× avg — average activity`;
+    components.push({ label: 'Volume', score: c, note });
+    total += c;
+  }
+
+  // Candle close quality — ±10 (where did price close in today's range)
+  let candleQuality: DailySentiment['candleQuality'] = null;
+  if (candlePos != null) {
+    const c = candlePos >= 0.70 ? 10 : candlePos >= 0.50 ? 5
+            : candlePos <= 0.10 ? -10 : candlePos <= 0.30 ? -5 : 0;
+    candleQuality = candlePos >= 0.70 ? 'strong_bull' : candlePos >= 0.50 ? 'bull'
+                  : candlePos <= 0.10 ? 'strong_bear' : candlePos <= 0.30 ? 'bear' : 'neutral';
+    const note = `Closed at ${(candlePos * 100).toFixed(0)}% of range — ${
+      c >  5 ? 'bullish close' : c >  0 ? 'mild bullish' :
+      c < -5 ? 'bearish close' : c <  0 ? 'mild bearish' : 'indecisive'}`;
+    components.push({ label: 'Candle close', score: c, note });
+    total += c;
+  }
+
+  // SMA5 position — ±10 (short-term trend context)
+  if (sma5 != null) {
+    const c    = price >= sma5 ? 10 : -10;
+    const dist = (price - sma5) / sma5 * 100;
+    const note = price >= sma5
+      ? `${dist.toFixed(1)}% above SMA5 — short-term trend intact`
+      : `${Math.abs(dist).toFixed(1)}% below SMA5 — below short-term trend`;
+    components.push({ label: 'SMA5', score: c, note });
+    total += c;
+  }
+
+  // Today's return vs prior close — ±10
+  if (todayReturnPct != null) {
+    const c = todayReturnPct > 2 ? 10 : todayReturnPct > 0.5 ? 5
+            : todayReturnPct < -2 ? -10 : todayReturnPct < -0.5 ? -5 : 0;
+    const note = `${todayReturnPct >= 0 ? '+' : ''}${todayReturnPct.toFixed(2)}% vs prior close`;
+    components.push({ label: "Day's return", score: c, note });
+    total += c;
+  }
+
+  // Flame weekly — ±15 (demand/supply momentum)
+  const fw = opts?.flameWeekly ?? null;
+  if (fw != null) {
+    const c    = fw >  5 ? 15 : fw >  1 ?  8 : fw < -5 ? -15 : fw < -1 ? -8 : 0;
+    const note = Math.abs(fw) > 1
+      ? `${fw.toFixed(2)} — ${fw > 0 ? 'demand exceeding supply' : 'supply exceeding demand'}`
+      : `${fw.toFixed(2)} — balanced flow`;
+    components.push({ label: 'Flame (weekly)', score: c, note });
+    total += c;
+  }
+
+  // Normalise ±90 → 0–100
+  const MAX   = 90;
+  const score = Math.round(Math.max(0, Math.min(100, 50 + (total / MAX) * 50)));
+  const label: DailySentiment['label'] =
+    score >= 67 ? 'bullish'      :
+    score >= 55 ? 'lean_bullish' :
+    score >= 45 ? 'neutral'      :
+    score >= 33 ? 'lean_bearish' : 'bearish';
+
+  return { score, label, rsi2, todayReturnPct, volumeSurge, sma5Position, candleQuality, components };
 }
