@@ -869,11 +869,12 @@ export function Signals() {
           spyBars,
           nextEarningsDate: fund?.nextEarningsDate ?? null,
           livePrice:        h.currentPrice,
+          investingStyle:   settings.investingStyle,
         });
       }
     }
     return result;
-  }, [ohlcvData, signalHoldings, bridgewaterRegime, fundamentalsData, spyBars]);
+  }, [ohlcvData, signalHoldings, bridgewaterRegime, fundamentalsData, spyBars, settings.investingStyle]);
 
   const watchlistSignals = useMemo(() => {
     const result: Record<string, TechnicalSignals> = {};
@@ -886,11 +887,12 @@ export function Signals() {
           spyBars,
           nextEarningsDate: fund?.nextEarningsDate ?? null,
           livePrice:        w.currentPrice > 0 ? w.currentPrice : undefined,
+          investingStyle:   settings.investingStyle,
         });
       }
     }
     return result;
-  }, [ohlcvData, watchlist, bridgewaterRegime, fundamentalsData, spyBars]);
+  }, [ohlcvData, watchlist, bridgewaterRegime, fundamentalsData, spyBars, settings.investingStyle]);
 
   // Cross-sectional relative strength rank (6M return, skip last 20 bars)
   // Rank 1 = strongest 6M momentum in the universe
@@ -1007,6 +1009,24 @@ export function Signals() {
               </div>
             )}
           </div>
+        </div>
+      )}
+
+      {/* Investing style banner */}
+      {settings.investingStyle === 'value' && (
+        <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl px-4 py-3 flex items-center gap-3">
+          <span className="text-amber-400 text-lg">&#9670;</span>
+          <p className="text-sm text-amber-300">
+            <span className="font-semibold">Value Mode</span> — signals are entry timing aids. Your fundamental thesis drives the decision; technicals only tell you when to act on it.
+          </p>
+        </div>
+      )}
+      {settings.investingStyle === 'momentum' && (
+        <div className="bg-blue-500/10 border border-blue-500/30 rounded-xl px-4 py-3 flex items-center gap-3">
+          <span className="text-blue-400 text-lg">&#9650;</span>
+          <p className="text-sm text-blue-300">
+            <span className="font-semibold">Momentum Mode</span> — trend and TSMOM gates are fully active. Signals favour stocks with positive 6-month price momentum.
+          </p>
         </div>
       )}
 

@@ -1,4 +1,4 @@
-import { Eye, EyeOff, RefreshCw, CheckCircle, AlertCircle, Loader } from 'lucide-react';
+import { Eye, EyeOff, RefreshCw, CheckCircle, AlertCircle, Loader, TrendingUp } from 'lucide-react';
 import { usePortfolioStore } from '../../store/portfolioStore';
 import { useEffect } from 'react';
 import { formatDistanceToNow } from 'date-fns';
@@ -72,6 +72,26 @@ export function Header() {
         >
           {statusIcon()}
           <span>{statusLabel()}</span>
+        </button>
+
+        <button
+          onClick={() => {
+            const next = settings.investingStyle === 'value' ? 'mixed' : settings.investingStyle === 'mixed' ? 'momentum' : 'value';
+            updateSettings({ investingStyle: next });
+          }}
+          className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all border ${
+            settings.investingStyle === 'value'
+              ? 'border-amber-500 bg-amber-500/10 text-amber-400'
+              : settings.investingStyle === 'momentum'
+              ? 'border-blue-500 bg-blue-500/10 text-blue-400'
+              : 'border-slate-700 text-slate-400 hover:text-slate-100 hover:border-slate-600'
+          }`}
+          title="Cycle: Value → Mixed → Momentum (affects signal framing on Signals page)"
+        >
+          <TrendingUp size={13} />
+          <span>
+            {settings.investingStyle === 'value' ? 'Value' : settings.investingStyle === 'momentum' ? 'Momentum' : 'Mixed'}
+          </span>
         </button>
 
         <button

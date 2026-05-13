@@ -285,6 +285,7 @@ export interface SignalComputeOptions {
   spyBars?: OHLCVBar[];             // for beta vs SPY computation
   livePrice?: number;               // live current price — overrides last bar close for entry/target computation
   nextEarningsDate?: string | null; // ISO date of next (or most recent) earnings
+  investingStyle?: 'value' | 'momentum' | 'mixed'; // adjusts signal framing
 }
 
 // ─── Main signal computation ─────────────────────────────────────────────────
@@ -297,6 +298,7 @@ export function computeTechnicalSignals(
   const n = bars.length;
   const closes = bars.map(b => b.close);
   const price = options?.livePrice ?? closes[n - 1];
+  const isValue = options?.investingStyle === 'value';
 
   // ── Core indicators ────────────────────────────────────────────────────────
   const sma20arr = computeSMA(closes, 20);
@@ -373,8 +375,9 @@ export function computeTechnicalSignals(
   if (goldenCross) trendScore = Math.min(100, trendScore + 12);
   if (deathCross)  trendScore = Math.max(0,   trendScore - 12);
 
-  // TSMOM gate: if 6M return is negative, cap trend signals at neutral
-  if (!tsmomBullish) trendScore = Math.min(trendScore, 50);
+  // TSMOM gate: cap trend in downtrend (value mode lifts cap; mixed softens to 60)
+  const tsmomCap = isValue ? 100 : options?.investingStyle === 'mixed' ? 60 : 50;
+  if (!tsmomBullish) trendScore = Math.min(trendScore, tsmomCap);
 
   // ── MOMENTUM SCORE (base weight 30%) ──────────────────────────────────────
   let macdScore = 50;
@@ -386,7 +389,7 @@ export function computeTechnicalSignals(
     else macdScore = 10;
   }
   // TSMOM gate: cap MACD momentum at neutral in a 6M downtrend
-  if (!tsmomBullish) macdScore = Math.min(macdScore, 50);
+  if (!tsmomBullish) macdScore = Math.min(macdScore, tsmomCap);
 
   let rsiScore = 50;
   if (rsi != null) {
@@ -485,7 +488,7 @@ export function computeTechnicalSignals(
   } else if (isBearish) {
     entryQuality = 'avoid';
     entryNote = 'Signal is bearish — wait for trend to reverse before entering long.';
-  } else if (!tsmomBullish && rating !== 'STRONG_BUY') {
+  } else if (!tsmomBullish && rating !== 'STRONG_BUY' && !isValue) {
     entryQuality = 'stretched';
     if (sma20 != null && price < sma20) {
       entryLimit = Math.round(price * 100) / 100;
@@ -513,19 +516,27 @@ export function computeTechnicalSignals(
     const distPct = (price - sma20) / sma20;
 
     if (distPct < -0.08) {
-      // Deep sell-off — price far below SMA20
       entryLimit = Math.round(price * 100) / 100;
-      entryQuality = 'avoid';
-      entryNote = `Price is ${(Math.abs(distPct) * 100).toFixed(1)}% below SMA20 (${sma20.toFixed(2)}) — deep sell-off. Wait for stabilisation near the MA before entering.`;
+      if (isValue) {
+        entryQuality = 'ok';
+        entryNote = `Price is ${(Math.abs(distPct) * 100).toFixed(1)}% below SMA20 (${sma20.toFixed(2)}) — deep discount. Value entry zone; scale in gradually. Confirm your fundamental thesis. Stop at −3×ATR.`;
+      } else {
+        entryQuality = 'avoid';
+        entryNote = `Price is ${(Math.abs(distPct) * 100).toFixed(1)}% below SMA20 (${sma20.toFixed(2)}) — deep sell-off. Wait for stabilisation near the MA before entering.`;
+      }
     } else if (distPct < -0.04) {
       entryLimit = Math.round(price * 100) / 100;
-      entryQuality = 'ok';
-      entryNote = `Price has pulled back ${(Math.abs(distPct) * 100).toFixed(1)}% below SMA20 (${sma20.toFixed(2)}). Decent dip entry; consider half-size and watch for reclaim of the MA.`;
+      if (isValue) {
+        entryQuality = 'ideal';
+        entryNote = `Price has pulled back ${(Math.abs(distPct) * 100).toFixed(1)}% below SMA20 (${sma20.toFixed(2)}) — attractive discount. Good value entry; stop at −3×ATR.`;
+      } else {
+        entryQuality = 'ok';
+        entryNote = `Price has pulled back ${(Math.abs(distPct) * 100).toFixed(1)}% below SMA20 (${sma20.toFixed(2)}). Decent dip entry; consider half-size and watch for reclaim of the MA.`;
+      }
     } else if (distPct < 0) {
-      // Price right at or just below SMA20
       entryLimit = Math.round(price * 100) / 100;
       entryQuality = 'ideal';
-      entryNote = `Price has pulled back to SMA20 (${sma20.toFixed(2)}) — textbook dip entry. Risk/reward is optimal; stop below recent low or −2×ATR.`;
+      entryNote = `Price has pulled back to SMA20 (${sma20.toFixed(2)}) — textbook dip entry. Risk/reward is optimal; stop below recent low or −${isValue ? 3 : 2}×ATR.`;
     } else if (distPct <= 0.01) {
       entryLimit = Math.round(sma20 * 100) / 100;
       entryQuality = 'ideal';
@@ -536,12 +547,16 @@ export function computeTechnicalSignals(
       entryNote = `Price is ${(distPct * 100).toFixed(1)}% above SMA20. Acceptable; consider half-size and add on dip toward ${sma20.toFixed(2)}.`;
     } else if (distPct <= 0.08) {
       entryLimit = Math.round(sma20 * 100) / 100;
-      entryQuality = 'stretched';
-      entryNote = `Price is ${(distPct * 100).toFixed(1)}% above SMA20 — extended. Wait for pullback to ~${sma20.toFixed(2)}.`;
+      entryQuality = isValue ? 'ok' : 'stretched';
+      entryNote = isValue
+        ? `Price is ${(distPct * 100).toFixed(1)}% above SMA20 — slightly extended. Prefer a pullback toward ${sma20.toFixed(2)} for better value entry.`
+        : `Price is ${(distPct * 100).toFixed(1)}% above SMA20 — extended. Wait for pullback to ~${sma20.toFixed(2)}.`;
     } else {
       entryLimit = Math.round(sma20 * 100) / 100;
-      entryQuality = 'avoid';
-      entryNote = `Price is ${(distPct * 100).toFixed(1)}% above SMA20 — overextended. High pullback risk; wait for reset to ~${sma20.toFixed(2)}.`;
+      entryQuality = isValue ? 'stretched' : 'avoid';
+      entryNote = isValue
+        ? `Price is ${(distPct * 100).toFixed(1)}% above SMA20 — overextended for a value entry. Wait for a meaningful pullback to ~${sma20.toFixed(2)}.`
+        : `Price is ${(distPct * 100).toFixed(1)}% above SMA20 — overextended. High pullback risk; wait for reset to ~${sma20.toFixed(2)}.`;
     }
 
     if (bbUpper != null && price < bbUpper) {
@@ -558,8 +573,9 @@ export function computeTechnicalSignals(
   }
 
   // ── EXITS ─────────────────────────────────────────────────────────────────
-  // Static stop for new entries (2×ATR from current price)
-  const suggestedStop = atr != null ? Math.round((price - 2 * atr) * 100) / 100 : null;
+  // Static stop for new entries (value mode uses 3×ATR for wider stop; default 2×ATR)
+  const stopMult = isValue ? 3 : 2;
+  const suggestedStop = atr != null ? Math.round((price - stopMult * atr) * 100) / 100 : null;
 
   // Chandelier Exit: max(close since entry) − 3×ATR(22), ratchets up with position
   let chandelierStop: number | null = null;
