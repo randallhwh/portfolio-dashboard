@@ -6,7 +6,7 @@ import {
   ReferenceLine, ResponsiveContainer,
 } from 'recharts';
 import {
-  computeSMA, computeRSI, computeMACD, computeBollingerBands,
+  computeSMA, computeRSI, computeMACD, computeBollingerBands, rollingMeanN,
 } from '../../services/technicals';
 import type { OHLCVBar, TechnicalSignals, SignalRating } from '../../types/portfolio';
 
@@ -93,6 +93,23 @@ function MACDTooltip({ active, payload, label }: {
   );
 }
 
+function FlameTooltip({ active, payload, label }: {
+  active?: boolean;
+  payload?: { dataKey: string; value: number }[];
+  label?: string;
+}) {
+  if (!active || !payload?.length) return null;
+  const weekly  = payload.find(p => p.dataKey === 'flameWeekly');
+  const monthly = payload.find(p => p.dataKey === 'flameMonthly');
+  return (
+    <div className="bg-slate-800 border border-slate-600 rounded-lg p-2 text-xs shadow-xl">
+      <p className="text-slate-400">{label}</p>
+      {weekly  && <p className="font-mono text-amber-300">Weekly:  {weekly.value?.toFixed(2)}</p>}
+      {monthly && <p className="font-mono text-blue-300"> Monthly: {monthly.value?.toFixed(2)}</p>}
+    </div>
+  );
+}
+
 // ─── Main modal ───────────────────────────────────────────────────────────────
 
 export function ChartModal({
@@ -119,12 +136,35 @@ export function ChartModal({
 
   // Compute indicator series
   const { chartData, yDomain } = useMemo(() => {
-    const closes = bars.map(b => b.close);
+    const closes  = bars.map(b => b.close);
+    const volumes = bars.map(b => b.volume);
     const sma20a = computeSMA(closes, 20);
     const sma50a = computeSMA(closes, 50);
+    const sma10a = computeSMA(closes, 10);
+    const volSma = computeSMA(volumes, 20);
     const { upper: bbUp, middle: bbMid, lower: bbLow } = computeBollingerBands(closes);
     const rsiA = computeRSI(closes, 14);
     const { macd: macdA, signal: sigA, histogram: histA } = computeMACD(closes);
+
+    // Flame indicator
+    const thrustA: (number | null)[] = bars.map((b, i) => {
+      if (i === 0) return null;
+      const r = closes[i - 1] > 0 ? (closes[i] - closes[i - 1]) / closes[i - 1] * 100 : null;
+      const avgVol = volSma[i];
+      if (r == null || avgVol == null || avgVol === 0) return null;
+      return r * (b.volume / avgVol);
+    });
+    const demandA  = rollingMeanN(thrustA.map(t => t == null ? null : Math.max(t, 0)), 20);
+    const supplyA  = rollingMeanN(thrustA.map(t => t == null ? null : Math.max(-t, 0)), 20);
+    const mPctA    = closes.map((c, i) => sma20a[i] != null ? 100 * (c / sma20a[i]! - 1) : null);
+    const fmPctA   = closes.map((c, i) => sma10a[i] != null ? 100 * (c / sma10a[i]! - 1) : null);
+    const rawA: (number | null)[] = closes.map((_, i) => {
+      const m = mPctA[i], fm = fmPctA[i], d = demandA[i], s = supplyA[i];
+      if (m == null || fm == null || d == null || s == null) return null;
+      return 0.4 * m + 0.3 * fm + 0.3 * (d - s);
+    });
+    const flameWA = rollingMeanN(rawA, 10);
+    const flameMA = rollingMeanN(rawA, 60);
 
     const data = bars.map((b, i) => ({
       date:       b.date.slice(5),         // MM-DD for X labels
@@ -143,6 +183,8 @@ export function ChartModal({
       macdSignal: sigA[i]  ?? undefined,
       macdHistPos: histA[i] != null && histA[i]! > 0  ? histA[i]! : undefined,
       macdHistNeg: histA[i] != null && histA[i]! <= 0 ? histA[i]! : undefined,
+      flameWeekly:  flameWA[i] ?? undefined,
+      flameMonthly: flameMA[i] ?? undefined,
     }));
 
     // Y domain: encompass price, BB bands, and all reference levels
@@ -423,6 +465,46 @@ export function ChartModal({
                 <Line dataKey="macdSignal" stroke="#fb923c" strokeWidth={1.5} dot={false} name="Signal" isAnimationActive={false} />
               </ComposedChart>
             </ResponsiveContainer>
+            </div>
+          </div>
+
+          {/* ── Flame panel ─────────────────────────────────────────────────── */}
+          <div className="flex-[2] min-h-0 bg-slate-950/60 rounded-xl flex flex-col p-3">
+            <div className="shrink-0 flex items-center justify-between mb-1">
+              <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">
+                Flame · 0.4·M + 0.3·FM + 0.3·(D−S)
+              </p>
+              <div className="flex items-center gap-3 text-[11px] font-mono">
+                {sig.flameWeekly != null && (
+                  <span className={sig.flameWeekly >= 0 ? 'text-amber-300' : 'text-amber-600'}>
+                    W {sig.flameWeekly >= 0 ? '+' : ''}{sig.flameWeekly.toFixed(2)}
+                  </span>
+                )}
+                {sig.flameMonthly != null && (
+                  <span className={sig.flameMonthly >= 0 ? 'text-blue-300' : 'text-blue-500'}>
+                    M {sig.flameMonthly >= 0 ? '+' : ''}{sig.flameMonthly.toFixed(2)}
+                  </span>
+                )}
+              </div>
+            </div>
+            <div className="flex-1 min-h-0">
+              <ResponsiveContainer width="100%" height="100%">
+                <ComposedChart data={chartData} margin={{ top: 2, right: 90, left: 0, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="2 5" stroke="#1e293b" />
+                  <XAxis dataKey="date" tick={false} axisLine={false} tickLine={false} />
+                  <YAxis
+                    tick={{ fontSize: 9, fill: '#475569' }}
+                    tickFormatter={v => v.toFixed(1)}
+                    tickLine={false}
+                    axisLine={false}
+                    width={58}
+                  />
+                  <Tooltip content={<FlameTooltip />} />
+                  <ReferenceLine y={0} stroke="#475569" strokeWidth={1} />
+                  <Line dataKey="flameMonthly" stroke="#60a5fa" strokeWidth={2}   dot={false} name="Monthly" isAnimationActive={false} />
+                  <Line dataKey="flameWeekly"  stroke="#fbbf24" strokeWidth={1.5} dot={false} name="Weekly"  isAnimationActive={false} />
+                </ComposedChart>
+              </ResponsiveContainer>
             </div>
           </div>
 

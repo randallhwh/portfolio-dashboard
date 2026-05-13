@@ -2,6 +2,19 @@ import type { OHLCVBar, TechnicalSignals, SignalRating } from '../types/portfoli
 
 // ─── Indicator helpers ────────────────────────────────────────────────────────
 
+// Rolling mean over nullable arrays — requires exactly `window` non-null values in each window
+export function rollingMeanN(arr: (number | null)[], window: number): (number | null)[] {
+  const out: (number | null)[] = new Array(arr.length).fill(null);
+  for (let i = window - 1; i < arr.length; i++) {
+    let sum = 0, cnt = 0;
+    for (let j = i - window + 1; j <= i; j++) {
+      if (arr[j] != null) { sum += arr[j]!; cnt++; }
+    }
+    if (cnt === window) out[i] = sum / window;
+  }
+  return out;
+}
+
 export function computeSMA(values: number[], period: number): (number | null)[] {
   const result: (number | null)[] = new Array(values.length).fill(null);
   if (values.length < period) return result;
@@ -642,6 +655,45 @@ export function computeTechnicalSignals(
     clip(volumeScore / 100),                    // volume sub-score
   ];
 
+  // ── FLAME INDICATOR (Price Momentum × Volume Demand/Supply) ──────────────
+  // Formula from notebook: Flame_raw = 0.4*M + 0.3*FM + 0.3*(D − S)
+  //   M  = 100 * (close/SMA20 − 1)       — deviation from 20d MA (%)
+  //   FM = 100 * (close/SMA10 − 1)       — deviation from 10d MA (%)
+  //   thrust = return_pct * (vol/avgVol) — volume-normalised daily thrust
+  //   D = rolling(20) mean of max(thrust, 0)  — demand
+  //   S = rolling(20) mean of max(−thrust, 0) — supply
+  const sma10arr = computeSMA(closes, 10);
+
+  const thrustArr: (number | null)[] = bars.map((b, i) => {
+    if (i === 0) return null;
+    const r = closes[i - 1] > 0 ? (closes[i] - closes[i - 1]) / closes[i - 1] * 100 : null;
+    const avgVol = volSma[i];
+    if (r == null || avgVol == null || avgVol === 0) return null;
+    return r * (b.volume / avgVol);
+  });
+
+  const demandArr = rollingMeanN(thrustArr.map(t => t == null ? null : Math.max(t, 0)), 20);
+  const supplyArr = rollingMeanN(thrustArr.map(t => t == null ? null : Math.max(-t, 0)), 20);
+
+  const flameMArr  = closes.map((c, i) => sma20arr[i] != null ? 100 * (c / sma20arr[i]! - 1) : null);
+  const flameFMArr = closes.map((c, i) => sma10arr[i] != null ? 100 * (c / sma10arr[i]! - 1) : null);
+
+  const flameRawArr: (number | null)[] = closes.map((_, i) => {
+    const m = flameMArr[i], fm = flameFMArr[i], d = demandArr[i], s = supplyArr[i];
+    if (m == null || fm == null || d == null || s == null) return null;
+    return 0.4 * m + 0.3 * fm + 0.3 * (d - s);
+  });
+
+  const flameWeeklyArr  = rollingMeanN(flameRawArr, 10);
+  const flameMonthlyArr = rollingMeanN(flameRawArr, 60);
+
+  const flameHistory = bars
+    .map((b, i) => ({ date: b.date, flameWeekly: flameWeeklyArr[i], flameMonthly: flameMonthlyArr[i] }))
+    .filter(row => row.flameWeekly != null || row.flameMonthly != null);
+
+  const flameWeekly  = flameWeeklyArr[n - 1];
+  const flameMonthly = flameMonthlyArr[n - 1];
+
   // ── ROUNDING HELPERS ──────────────────────────────────────────────────────
   const round3 = (v: number | null) => v != null ? Math.round(v * 1000) / 1000 : null;
   const round2 = (v: number | null) => v != null ? Math.round(v * 100) / 100 : null;
@@ -697,5 +749,8 @@ export function computeTechnicalSignals(
     daysToEarnings,
     nearEarnings,
     featureVector,
+    flameWeekly:  flameWeekly  != null ? Math.round(flameWeekly  * 100) / 100 : null,
+    flameMonthly: flameMonthly != null ? Math.round(flameMonthly * 100) / 100 : null,
+    flameHistory,
   };
 }

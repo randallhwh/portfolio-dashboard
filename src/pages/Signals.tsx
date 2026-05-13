@@ -253,6 +253,48 @@ function DetailPanel({
         </div>
       </div>
 
+      {/* ── Flame indicator ──────────────────────────────────────────────── */}
+      {(sig.flameWeekly != null || sig.flameMonthly != null) && (() => {
+        const wPos = sig.flameWeekly  != null && sig.flameWeekly  >= 0;
+        const mPos = sig.flameMonthly != null && sig.flameMonthly >= 0;
+        const both = wPos && mPos;
+        const neither = !wPos && !mPos;
+        const label = both ? 'Bullish — both timeframes positive'
+          : neither ? 'Bearish — both timeframes negative'
+          : wPos ? 'Recovering — short-term buying, long-term weak'
+          : 'Weakening — short-term selling, long-term fading';
+        const labelCls = both ? 'text-emerald-400' : neither ? 'text-red-400' : 'text-amber-400';
+        return (
+          <div>
+            <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Flame Indicator</p>
+            <div className="bg-slate-800/60 border border-slate-700/50 rounded-xl p-3 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className={`text-xs font-semibold ${labelCls}`}>{label}</span>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <p className="text-[10px] text-slate-500 mb-0.5">Weekly Flame <span className="text-slate-600">(10d)</span></p>
+                  <p className={`text-sm font-bold font-mono ${sig.flameWeekly != null && sig.flameWeekly >= 0 ? 'text-amber-300' : 'text-amber-600'}`}>
+                    {sig.flameWeekly != null ? `${sig.flameWeekly >= 0 ? '+' : ''}${sig.flameWeekly.toFixed(2)}` : '—'}
+                  </p>
+                  <p className="text-[10px] text-slate-600 mt-0.5">fast signal</p>
+                </div>
+                <div>
+                  <p className="text-[10px] text-slate-500 mb-0.5">Monthly Flame <span className="text-slate-600">(60d)</span></p>
+                  <p className={`text-sm font-bold font-mono ${sig.flameMonthly != null && sig.flameMonthly >= 0 ? 'text-blue-300' : 'text-blue-500'}`}>
+                    {sig.flameMonthly != null ? `${sig.flameMonthly >= 0 ? '+' : ''}${sig.flameMonthly.toFixed(2)}` : '—'}
+                  </p>
+                  <p className="text-[10px] text-slate-600 mt-0.5">slow trend</p>
+                </div>
+              </div>
+              <p className="text-[10px] text-slate-600 border-t border-slate-700/50 pt-1.5">
+                0.4·M (SMA20 deviation) + 0.3·FM (SMA10 deviation) + 0.3·(D−S) (volume demand/supply)
+              </p>
+            </div>
+          </div>
+        );
+      })()}
+
       {/* ── Entry guidance ────────────────────────────────────────────────── */}
       {(() => {
         const qCfg = {

@@ -151,6 +151,10 @@ export interface TechnicalSignals {
   nearEarnings: boolean;         // within 7 calendar days of earnings event
   // Tier 3: ML feature vector (normalized indicators for offline model training)
   featureVector: number[];
+  // Flame indicator (composite: price momentum + volume demand/supply)
+  flameWeekly: number | null;   // 10-bar rolling mean of Flame_raw — fast signal
+  flameMonthly: number | null;  // 60-bar rolling mean of Flame_raw — slow trend
+  flameHistory: { date: string; flameWeekly: number | null; flameMonthly: number | null }[];
 }
 
 export interface WatchlistEntry {
