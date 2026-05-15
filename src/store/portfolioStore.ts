@@ -799,38 +799,37 @@ export const usePortfolioStore = create<PortfolioState>()(
     {
       name: 'portfolio-store',
       version: 16,
-      migrate: () => ({
-        holdings: INITIAL_HOLDINGS,
-        transactions: [],
-        snapshots: SAMPLE_SNAPSHOTS,
-        exchangeRates: DEFAULT_FX_RATES,
-        priceStatus: 'idle' as const,
-        lastUpdated: null,
-        settings: {
-          baseCurrency: 'SGD' as const,
-          showCostBasis: true,
-          neutralColorMode: false,
-          benchmarkTicker: 'SPY',
-          targetAllocations: {
-            stock: 60,
-            etf: 0,
-            bond: 20,
-            cash: 0,
-            crypto: 0,
-            real_estate: 20,
-            commodity: 0,
-            other: 0,
+      migrate: (persistedState: unknown) => {
+        // Preserve all existing user data; only fill in defaults for missing fields.
+        // This means a version bump never wipes trades, holdings, or settings.
+        const s = (persistedState ?? {}) as Partial<PortfolioState>;
+        return {
+          holdings:         s.holdings?.length ? s.holdings : INITIAL_HOLDINGS,
+          transactions:     s.transactions     ?? [],
+          snapshots:        s.snapshots        ?? SAMPLE_SNAPSHOTS,
+          exchangeRates:    s.exchangeRates    ?? DEFAULT_FX_RATES,
+          priceStatus:      'idle'             as const,
+          lastUpdated:      s.lastUpdated      ?? null,
+          activeView:       s.activeView       ?? 'dashboard' as const,
+          activePortfolio:  s.activePortfolio  ?? 'Liquid',
+          priceHistory:     s.priceHistory     ?? {},
+          ohlcvData:        {},
+          watchlist:        s.watchlist        ?? [],
+          fundamentalsData: s.fundamentalsData ?? {},
+          // Settings: apply defaults first, then spread user's saved values so
+          // their overrides win and any new fields pick up sensible defaults.
+          settings: {
+            baseCurrency:      'SGD'     as const,
+            showCostBasis:     true,
+            neutralColorMode:  false,
+            benchmarkTicker:   'SPY',
+            targetAllocations: { stock: 60, etf: 0, bond: 20, cash: 0, crypto: 0, real_estate: 20, commodity: 0, other: 0 },
+            riskTolerance:     'moderate' as const,
+            investingStyle:    'mixed'    as const,
+            ...(s.settings ?? {}),
           },
-          riskTolerance: 'moderate' as const,
-          investingStyle: 'mixed' as const,
-        },
-        activeView: 'dashboard' as const,
-        activePortfolio: 'Liquid',
-        priceHistory: {},
-        ohlcvData: {},
-        watchlist: [],
-        fundamentalsData: {},
-      }) as unknown as PortfolioState,
+        } as unknown as PortfolioState;
+      },
       // ohlcvData is in-memory only (can be large; regenerated on next price refresh)
       partialize: (state: PortfolioState) => {
         // eslint-disable-next-line @typescript-eslint/no-unused-vars
